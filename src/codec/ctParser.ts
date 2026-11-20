@@ -1,24 +1,12 @@
 import type { CircuitDocument, ComponentNode, ConnectionEdge } from '../contracts/circuit';
 import { EngineeringError } from '../contracts/errors';
-import { detectCircuitFormat, REQUIRED_GOLDEN_FIXTURES } from './ctDetector';
+import { detectCircuitFormat } from './ctDetector';
+import { decodeCtContainer } from './ctBinaryCodec';
+import { parseCtContainerToDocument } from './ctTextCodec';
 
 export interface ParseCircuitResult {
   document: CircuitDocument;
   format: 'fsim-ir-json' | 'fluidsim-4.5-ct';
-}
-
-export function buildPhase0CtGateError(filePath: string, operation: 'parse' | 'serialize'): EngineeringError {
-  return new EngineeringError({
-    category: 'UnsupportedFormatVersion',
-    code: 'PHASE_0_GOLDEN_FIXTURES_REQUIRED',
-    message: `Cannot ${operation} native FluidSIM 4.5 .ct file ("${filePath || '<buffer>'}") before Phase 0 golden fixture reverse-engineering is complete. Native .ct syntax is never hallucinated.`,
-    offendingIds: filePath ? [filePath] : [],
-    suggestedFix: `Add the 6 real FluidSIM Pneumatics 4.5 golden .ct fixtures (${REQUIRED_GOLDEN_FIXTURES.join(', ')}) to fixtures/golden/, run "npm run inspect-ct", and implement Phase 1 codec grammar. Until then, use ".fsim.json" semantic IR files for headless authoring and simulation.`,
-    details: {
-      requiredFixtures: [...REQUIRED_GOLDEN_FIXTURES],
-      operation,
-    },
-  });
 }
 
 function validateParsedDocument(raw: unknown, filePath: string): CircuitDocument {
@@ -107,8 +95,10 @@ function validateParsedDocument(raw: unknown, filePath: string): CircuitDocument
 export function parseCircuitBuffer(buffer: Buffer, filePath = ''): ParseCircuitResult {
   const detection = detectCircuitFormat(buffer, filePath);
 
-  if (detection.format === 'fluidsim-4.5-ct-pending-golden') {
-    throw buildPhase0CtGateError(filePath, 'parse');
+  if (detection.format === 'fluidsim-4.5-ct') {
+    const container = decodeCtContainer(buffer, filePath);
+    const document = parseCtContainerToDocument(container, filePath);
+    return { document, format: 'fluidsim-4.5-ct' };
   }
 
   if (detection.format === 'fsim-ir-json') {
@@ -122,6 +112,6 @@ export function parseCircuitBuffer(buffer: Buffer, filePath = ''): ParseCircuitR
     code: 'UNSUPPORTED_FORMAT',
     message: `Unsupported format "${detection.format}" for "${filePath}".`,
     offendingIds: filePath ? [filePath] : [],
-    suggestedFix: 'Use a .fsim.json IR file or complete Phase 0 with FluidSIM 4.5 .ct golden fixtures.',
+    suggestedFix: 'Use a Festo FluidSIM Pneumatics 4.5 .ct file or a .fsim.json IR file.',
   });
 }

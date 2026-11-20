@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * Phase 0 Reverse-Engineering & Pairwise Diff Tool for Festo FluidSIM Pneumatics 4.5 (.ct) files.
+ * Festo FluidSIM Pneumatics 4.5 (.ct) Binary Container & AST Inspector / Pairwise Diff Tool.
  *
  * Usage:
- *   npm run inspect-ct -- fixtures/golden/01_empty.ct
- *   npm run inspect-ct -- --diff fixtures/golden/01_empty.ct fixtures/golden/02_air_source.ct
+ *   npm run inspect-ct -- fixtures/golden/04_electro_pneumatic_abba.ct
+ *   npm run inspect-ct -- --dump-text fixtures/golden/04_electro_pneumatic_abba.ct
+ *   npm run inspect-ct -- --diff fixtures/golden/03_pneumatic_abba_sequence.ct fixtures/golden/04_electro_pneumatic_abba.ct
  *   npm run inspect-ct -- --check-golden
  */
 
@@ -12,6 +13,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { getGoldenFixtureStatus, REQUIRED_GOLDEN_FIXTURES } from '../src/codec/ctDetector';
+import { decodeCtContainer, isFluidSimCtBuffer, type CtCompressionProfile } from '../src/codec/ctBinaryCodec';
+import { parseCtBodyAst, parseCtContainerToDocument } from '../src/codec/ctTextCodec';
+
+export interface CtDecodedSummary {
+  profile: CtCompressionProfile;
+  decompressedByteLength: number;
+  headerLineCount: number;
+  hasFsPreview: boolean;
+  objectCount: number;
+  gateCount: number;
+  connectionCount: number;
+  classHistogram: Array<{ cls: string; count: number }>;
+  semanticComponents: number;
+  semanticConnections: number;
+  title: string;
+}
 
 export interface CtInspectionReport {
   filePath: string;
@@ -19,6 +36,7 @@ export interface CtInspectionReport {
   sha256: string;
   magicHex: string;
   magicAscii: string;
+  isFluidSimCt: boolean;
   encodingGuess: 'utf8' | 'latin1' | 'utf16le' | 'binary';
   lineEnding: 'CRLF' | 'LF' | 'CR' | 'MIXED' | 'NONE';
   lineCount: number;
@@ -32,6 +50,7 @@ export interface CtInspectionReport {
     minNumber: number | null;
     maxNumber: number | null;
   };
+  fluidsimDecoded?: CtDecodedSummary;
 }
 
 export function inspectCtBuffer(buffer: Buffer, filePath = '<buffer>'): CtInspectionReport {
@@ -42,28 +61,61 @@ export function inspectCtBuffer(buffer: Buffer, filePath = '<buffer>'): CtInspec
     .map((b) => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.'))
     .join('');
 
+  const isFluidSimCt = isFluidSimCtBuffer(buffer);
+  let fluidsimDecoded: CtDecodedSummary | undefined;
+  let analysisBuffer = buffer;
+
+  if (isFluidSimCt) {
+    const container = decodeCtContainer(buffer, filePath);
+    const ast = parseCtBodyAst(container.ctBody);
+    const doc = parseCtContainerToDocument(container, filePath);
+    const classCounts = new Map<string, number>();
+    for (const obj of ast.objects) {
+      classCounts.set(obj.cls, (classCounts.get(obj.cls) ?? 0) + 1);
+    }
+    fluidsimDecoded = {
+      profile: container.profile,
+      decompressedByteLength: container.decompressedByteLength,
+      headerLineCount: container.headerLinesB64.length,
+      hasFsPreview: container.fsPreviewBlock !== undefined,
+      objectCount: ast.objects.length,
+      gateCount: ast.gates.length,
+      connectionCount: ast.connections.length,
+      classHistogram: Array.from(classCounts.entries())
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([cls, count]) => ({ cls, count })),
+      semanticComponents: doc.components.length,
+      semanticConnections: doc.connections.length,
+      title: doc.metadata.title,
+    };
+    analysisBuffer = Buffer.from(container.ctBody, 'latin1');
+  }
+
   let nullByteCount = 0;
   let printableCount = 0;
-  for (let i = 0; i < buffer.length; i++) {
-    const b = buffer[i];
+  for (let i = 0; i < analysisBuffer.length; i++) {
+    const b = analysisBuffer[i];
     if (b === 0) nullByteCount++;
     if ((b >= 32 && b <= 126) || b === 9 || b === 10 || b === 13) printableCount++;
   }
-  const printableRatio = buffer.length > 0 ? Number((printableCount / buffer.length).toFixed(4)) : 0;
+  const printableRatio =
+    analysisBuffer.length > 0 ? Number((printableCount / analysisBuffer.length).toFixed(4)) : 0;
 
-  let encodingGuess: CtInspectionReport['encodingGuess'] = 'utf8';
-  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
-    encodingGuess = 'utf16le';
-  } else if (nullByteCount > buffer.length * 0.05) {
-    encodingGuess = 'binary';
-  } else {
-    const utf8Text = buffer.toString('utf8');
-    if (utf8Text.includes('\uFFFD')) {
-      encodingGuess = 'latin1';
+  let encodingGuess: CtInspectionReport['encodingGuess'] = isFluidSimCt ? 'binary' : 'utf8';
+  if (!isFluidSimCt) {
+    if (analysisBuffer.length >= 2 && analysisBuffer[0] === 0xff && analysisBuffer[1] === 0xfe) {
+      encodingGuess = 'utf16le';
+    } else if (nullByteCount > analysisBuffer.length * 0.05) {
+      encodingGuess = 'binary';
+    } else {
+      const utf8Text = analysisBuffer.toString('utf8');
+      if (utf8Text.includes('\uFFFD')) {
+        encodingGuess = 'latin1';
+      }
     }
   }
 
-  const text = encodingGuess === 'utf8' ? buffer.toString('utf8') : buffer.toString('latin1');
+  const text = encodingGuess === 'utf8' ? analysisBuffer.toString('utf8') : analysisBuffer.toString('latin1');
   const crlfCount = (text.match(/\r\n/g) ?? []).length;
   const lfOnlyCount = (text.match(/(?<!\r)\n/g) ?? []).length;
   const crOnlyCount = (text.match(/\r(?!\n)/g) ?? []).length;
@@ -77,7 +129,6 @@ export function inspectCtBuffer(buffer: Buffer, filePath = '<buffer>'): CtInspec
   const lines = text.split(/\r\n|\n|\r/);
   const headerPreview = lines.slice(0, 25).map((l) => l.slice(0, 140));
 
-  // Extract candidate structural/section identifiers (keywords, bracketed headers, tagged blocks)
   const tokenCounts = new Map<string, number>();
   const tokenRegex = /(?:^\[[^\]]+\]|^[A-Za-z_][A-Za-z0-9_.:-]{1,40}(?=\s|[=({:])|<[A-Za-z0-9_:-]+>)/gm;
   let match: RegExpExecArray | null;
@@ -90,7 +141,6 @@ export function inspectCtBuffer(buffer: Buffer, filePath = '<buffer>'): CtInspec
     .slice(0, 40)
     .map(([token, count]) => ({ token, count }));
 
-  // Numeric stats for coordinate scaling inspection
   const numMatches = text.match(/-?\d+(?:\.\d+)?/g) ?? [];
   let integerCount = 0;
   let floatCount = 0;
@@ -111,6 +161,7 @@ export function inspectCtBuffer(buffer: Buffer, filePath = '<buffer>'): CtInspec
     sha256,
     magicHex,
     magicAscii,
+    isFluidSimCt,
     encodingGuess,
     lineEnding,
     lineCount: lines.length,
@@ -124,6 +175,7 @@ export function inspectCtBuffer(buffer: Buffer, filePath = '<buffer>'): CtInspec
       minNumber,
       maxNumber,
     },
+    ...(fluidsimDecoded ? { fluidsimDecoded } : {}),
   };
 }
 
@@ -155,8 +207,11 @@ export function diffCtBuffers(
     firstDifferingByteOffset = minLen;
   }
 
-  const linesA = bufA.toString('latin1').split(/\r\n|\n|\r/);
-  const linesB = bufB.toString('latin1').split(/\r\n|\n|\r/);
+  const textA = isFluidSimCtBuffer(bufA) ? decodeCtContainer(bufA, fileA).ctBody : bufA.toString('latin1');
+  const textB = isFluidSimCtBuffer(bufB) ? decodeCtContainer(bufB, fileB).ctBody : bufB.toString('latin1');
+
+  const linesA = textA.split(/\r\n|\n|\r/);
+  const linesB = textB.split(/\r\n|\n|\r/);
 
   const setA = new Map<string, number>();
   for (const l of linesA) setA.set(l, (setA.get(l) ?? 0) + 1);
@@ -202,11 +257,12 @@ function runCli(): void {
   if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
     console.log(
       [
-        'FluidSIM 4.5 .ct Reverse-Engineering Inspector (Phase 0)',
+        'FluidSIM 4.5 .ct Binary & AST Inspector',
         '',
         'Usage:',
         '  inspect-ct --check-golden',
         '  inspect-ct <file.ct>',
+        '  inspect-ct --dump-text <file.ct>',
         '  inspect-ct --diff <base.ct> <target.ct>',
       ].join('\n'),
     );
@@ -225,6 +281,24 @@ function runCli(): void {
         2,
       ),
     );
+    return;
+  }
+
+  if (args[0] === '--dump-text') {
+    const targetArg = args[1];
+    if (!targetArg) {
+      console.error('Usage: inspect-ct --dump-text <file.ct>');
+      process.exitCode = 1;
+      return;
+    }
+    const buf = fs.readFileSync(path.resolve(targetArg));
+    if (!isFluidSimCtBuffer(buf)) {
+      console.error(`File "${targetArg}" is not a FluidSIM .ct binary container.`);
+      process.exitCode = 1;
+      return;
+    }
+    const container = decodeCtContainer(buf, targetArg);
+    process.stdout.write(`${container.ctBody}\n${container.trailerText}`);
     return;
   }
 

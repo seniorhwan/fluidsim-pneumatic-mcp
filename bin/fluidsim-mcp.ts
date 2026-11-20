@@ -140,11 +140,12 @@ async function main(): Promise<void> {
           `${SERVER_NAME} doctor: ${report.status.toUpperCase()}`,
           `  Node: ${report.nodeVersion} (${report.platform})`,
           `  Workspace: ${report.workspace.root} (writable=${report.workspace.writable})`,
-          `  Catalog: ${report.catalog.count} components (ok=${report.catalog.ok})`,
+          `  Catalog: ${report.catalog.count} components (${report.catalog.verifiedFluidsim45Count} verified FluidSIM 4.5 IDs, ok=${report.catalog.ok})`,
           `  IR Codec Self-Test: ${report.codec.irJsonRoundtripOk ? 'PASS' : 'FAIL'}`,
-          `  Native .ct 4.5 Golden Gate: ${
+          `  Native .ct 4.5 Codec Self-Test: ${report.codec.nativeCt45RoundtripOk ? 'PASS' : 'FAIL'}`,
+          `  Native .ct 4.5 Golden Fixtures: ${
             report.codec.nativeCt45Ready
-              ? 'READY'
+              ? `READY (${report.codec.goldenFixturesPresent.length}/6 verified)`
               : `PENDING (${report.codec.goldenFixturesMissing.length} missing: ${report.codec.goldenFixturesMissing.join(', ')})`
           }`,
         ].join('\n') + '\n',

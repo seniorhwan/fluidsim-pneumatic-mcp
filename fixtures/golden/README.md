@@ -1,28 +1,24 @@
-# Golden Fixtures for Festo FluidSIM Pneumatics 4.5 (`.ct`)
+# Golden Festo FluidSIM `.ct` Fixtures
 
-This directory enforces the **Phase 0 Golden Fixture Gate**.
+These 6 real Festo FluidSIM Pneumatics `.ct` circuit files were used to empirically reverse-engineer, implement, and regression-test the lossless native `.ct` codec documented in `/docs/CT_FORMAT_4_5.md`.
 
-FluidSIM Pneumatics 4.5's `.ct` format is proprietary. To guarantee 100% lossless roundtrip compatibility and zero hallucinated syntax, the native `.ct` parser (`src/codec/ctParser.ts`) and serializer (`src/codec/ctSerializer.ts`) remain gated until the following **6 minimal `.ct` fixtures** exported directly from Festo FluidSIM Pneumatics 4.5 are placed here:
+| Fixture | Compression Profile | Key Verified Coverage |
+|---|---|---|
+| `01_direct_indirect_cylinders.ct` | Extended (`W=2048`, `maxLen=16`) | `PPE1`, `PPE2`, `CompressorFixedP`, `CylDGPPAB` (both SAC & DAC), `WV_3` manual/pilot, `WV_5` pilot, `PConnection` `EX3` silencers, `CON PLine` |
+| `02_speed_control_throttle.ct` | Extended (`W=2048`, `maxLen=16`) | `DV_P1` throttle / flow control, `CheckValveP`, `CylDGPPAB`, `WV_3`, `WV_5`, large multi-circuit sheet (82 KB decompressed) |
+| `03_pneumatic_abba_sequence.ct` | Extended (`W=2048`, `maxLen=16`) | Pure pneumatic `A+ B+ B- A-` sequence, `R_SCHALT` distance rules, `UMConnection` roller labels, `WV_3` mechanical roller (`AL_ME2`), `WV_5` double-pilot |
+| `04_electro_pneumatic_abba.ct` | Extended (`W=2048`, `maxLen=16`) | Electro-pneumatic `A+ B+ B- A-`, `pol2` (+24V), `pol1` (0V), `E_S011`, `E_S012`, `E_K001`, `E_S001`, `E_S002`, `E_Y001`, `UEConnection` solenoid bindings, `ETriconnection`, `PTriconnection`, `CON ELine` |
+| `05_timer_counter_electro.ct` | Extended (`W=2048`, `maxLen=16`) | `E_K008` ON-delay timer relay, `E_P010` preset counter relay, `lampe`, `R_SCHALT`, electro-pneumatic control |
+| `06_electrical_latch_legacy.ct` | Compact (`W=512`, `maxLen=64`) | Compact FluidSIM 3.6/4.x compression profile, `BEGIN_FSPREVIEW`..`END_FSPREVIEW`, legacy `line A B` connection syntax, electrical self-holding latch |
 
-| # | Filename | Required Circuit Contents |
-|---|----------|---------------------------|
-| 1 | `01_empty.ct` | Blank FluidSIM 4.5 pneumatic sheet (default page size, zero components). |
-| 2 | `02_air_source.ct` | Single compressed air supply source placed on the sheet. |
-| 3 | `03_direct_3_2_sac.ct` | Compressed air source + air service unit (FRL) + 3/2-way pushbutton valve (NC, spring return) + single-acting cylinder. |
-| 4 | `04_indirect_5_2_dac.ct` | Double-acting cylinder with distance rule (`a0` at 0 mm, `a1` at 100 mm) + two one-way flow control valves + 5/2-way double-pilot valve (`14`/`12`) + two 3/2-way valves. |
-| 5 | `05_electro_latch.ct` | `+24V` / `0V` rails + NO start pushbutton `S1` + NC stop pushbutton `S2` + relay `K1` self-latching contact + valve solenoid `Y1` + 5/2-way solenoid/spring valve + double-acting cylinder. |
-| 6 | `06_logic_timer.ct` | Shuttle valve (OR) + dual-pressure valve (AND) + pneumatic time-delay valve (NC). |
+Run the roundtrip verification suite at any time:
 
-## Verification Workflow After Dropping Fixtures
+```bash
+npm test
+```
 
-1. Confirm all 6 files are detected:
-   ```bash
-   npm run inspect-ct -- --check-golden
-   ```
-2. Inspect structure, encoding, and headers:
-   ```bash
-   npm run inspect-ct -- fixtures/golden/01_empty.ct
-   npm run inspect-ct -- --diff fixtures/golden/01_empty.ct fixtures/golden/02_air_source.ct
-   npm run inspect-ct -- --diff fixtures/golden/02_air_source.ct fixtures/golden/03_direct_3_2_sac.ct
-   ```
-3. Document verified grammar in `docs/CT_FORMAT_4_5.md`, update `fluidsim45Id` + `fluidsim45IdVerified: true` in `src/catalog/pneumatics45.ts`, and unlock native `.ct` parsing/serialization in `src/codec/ctParser.ts` and `src/codec/ctSerializer.ts`.
+Inspect any `.ct` file's header, compression profile, and decompressed circuit text:
+
+```bash
+npm run inspect-ct -- fixtures/golden/04_electro_pneumatic_abba.ct
+```

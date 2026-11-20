@@ -2,9 +2,10 @@ import type { CatalogComponentDef, ComponentCategory, Domain, PortDefinition } f
 
 /**
  * Verified ISO 1219 & Festo FluidSIM Pneumatics 4.5 Component Catalog.
- * Note on Phase 0 Golden Fixture Gate:
- * `fluidsim45IdVerified` stays `false` until empirically confirmed against real
- * FluidSIM Pneumatics 4.5 `.ct` fixtures in `fixtures/golden/`.
+ * 23/34 components have empirically verified `fluidsim45Id` class names extracted from
+ * real FluidSIM `.ct` files in `fixtures/golden/`. The remaining 11 components keep
+ * `fluidsim45IdVerified: false` (never hallucinated) and roundtrip losslessly via
+ * `_MCP_TYPE`/`_MCP_PARAMS` in `.ct` and natively in `.fsim.json`.
  */
 export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   // =========================================================================
@@ -12,8 +13,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   // =========================================================================
   {
     type: 'air_source',
-    fluidsim45Id: 'FS45_PENDING_AIR_SOURCE',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'PPE1',
+    fluidsim45IdVerified: true,
     displayName: 'Compressed Air Supply',
     category: 'air_supply',
     domain: 'pneumatic',
@@ -31,8 +32,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'air_service_unit',
-    fluidsim45Id: 'FS45_PENDING_AIR_SERVICE_UNIT',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'PPE2',
+    fluidsim45IdVerified: true,
     displayName: 'Air Service Unit (FRL)',
     category: 'air_supply',
     domain: 'pneumatic',
@@ -50,8 +51,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'exhaust_silencer',
-    fluidsim45Id: 'FS45_PENDING_EXHAUST_SILENCER',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'PConnection:EX3',
+    fluidsim45IdVerified: true,
     displayName: 'Exhaust / Silencer Terminator',
     category: 'air_supply',
     domain: 'pneumatic',
@@ -66,8 +67,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'pneumatic_junction',
-    fluidsim45Id: 'FS45_PENDING_PNEUMATIC_TEE',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'PTriconnection',
+    fluidsim45IdVerified: true,
     displayName: 'Pneumatic T-Junction / Manifold',
     category: 'air_supply',
     domain: 'pneumatic',
@@ -89,8 +90,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   // =========================================================================
   {
     type: 'cylinder_single_acting',
-    fluidsim45Id: 'FS45_PENDING_CYL_SAC',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'CylDGPPAB:SA',
+    fluidsim45IdVerified: true,
     displayName: 'Single-Acting Cylinder (Spring Return)',
     category: 'actuator',
     domain: 'pneumatic',
@@ -112,8 +113,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'cylinder_double_acting',
-    fluidsim45Id: 'FS45_PENDING_CYL_DAC',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'CylDGPPAB:DA',
+    fluidsim45IdVerified: true,
     displayName: 'Double-Acting Cylinder',
     category: 'actuator',
     domain: 'pneumatic',
@@ -141,8 +142,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   // =========================================================================
   {
     type: 'valve_3_2',
-    fluidsim45Id: 'FS45_PENDING_VALVE_3_2',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'WV_3',
+    fluidsim45IdVerified: true,
     displayName: '3/2-Way Directional Control Valve',
     category: 'directional_valve',
     domain: 'hybrid',
@@ -190,8 +191,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'valve_5_2',
-    fluidsim45Id: 'FS45_PENDING_VALVE_5_2',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'WV_5',
+    fluidsim45IdVerified: true,
     displayName: '5/2-Way Directional Control Valve',
     category: 'directional_valve',
     domain: 'hybrid',
@@ -246,8 +247,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   // =========================================================================
   {
     type: 'flow_control_one_way',
-    fluidsim45Id: 'FS45_PENDING_ONE_WAY_FLOW_CONTROL',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'DV_P1',
+    fluidsim45IdVerified: true,
     displayName: 'One-Way Flow Control Valve (Throttle Check)',
     category: 'flow_pressure_logic',
     domain: 'pneumatic',
@@ -386,8 +387,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   // =========================================================================
   {
     type: 'power_24v',
-    fluidsim45Id: 'FS45_PENDING_POWER_24V',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'pol2',
+    fluidsim45IdVerified: true,
     displayName: '+24V DC Power Supply Rail',
     category: 'electrical_power',
     domain: 'electrical',
@@ -404,8 +405,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'power_0v',
-    fluidsim45Id: 'FS45_PENDING_POWER_0V',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'pol1',
+    fluidsim45IdVerified: true,
     displayName: '0V DC Common / Ground Rail',
     category: 'electrical_power',
     domain: 'electrical',
@@ -420,8 +421,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'electrical_junction',
-    fluidsim45Id: 'FS45_PENDING_ELEC_JUNCTION',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'ETriconnection',
+    fluidsim45IdVerified: true,
     displayName: 'Electrical Wire Junction',
     category: 'electrical_power',
     domain: 'electrical',
@@ -439,8 +440,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'pushbutton_no',
-    fluidsim45Id: 'FS45_PENDING_PB_NO',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'E_S011',
+    fluidsim45IdVerified: true,
     displayName: 'Pushbutton (Normally Open)',
     category: 'electrical_switch',
     domain: 'electrical',
@@ -458,8 +459,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'pushbutton_nc',
-    fluidsim45Id: 'FS45_PENDING_PB_NC',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'E_S012',
+    fluidsim45IdVerified: true,
     displayName: 'Pushbutton (Normally Closed)',
     category: 'electrical_switch',
     domain: 'electrical',
@@ -477,8 +478,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'limit_switch_no',
-    fluidsim45Id: 'FS45_PENDING_LIMIT_NO',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'E_S001:SWITCH_TYPE=1',
+    fluidsim45IdVerified: true,
     displayName: 'Limit Switch Contact (NO)',
     category: 'electrical_switch',
     domain: 'electrical',
@@ -494,8 +495,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'limit_switch_nc',
-    fluidsim45Id: 'FS45_PENDING_LIMIT_NC',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'E_S002:SWITCH_TYPE=1',
+    fluidsim45IdVerified: true,
     displayName: 'Limit Switch Contact (NC)',
     category: 'electrical_switch',
     domain: 'electrical',
@@ -530,8 +531,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'relay_coil',
-    fluidsim45Id: 'FS45_PENDING_RELAY_COIL',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'E_K001',
+    fluidsim45IdVerified: true,
     displayName: 'Control Relay Coil (K1..Kn)',
     category: 'electrical_relay',
     domain: 'electrical',
@@ -547,8 +548,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'relay_contact_no',
-    fluidsim45Id: 'FS45_PENDING_RELAY_CONTACT_NO',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'E_S001',
+    fluidsim45IdVerified: true,
     displayName: 'Relay Contact (NO)',
     category: 'electrical_relay',
     domain: 'electrical',
@@ -564,8 +565,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'relay_contact_nc',
-    fluidsim45Id: 'FS45_PENDING_RELAY_CONTACT_NC',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'E_S002',
+    fluidsim45IdVerified: true,
     displayName: 'Relay Contact (NC)',
     category: 'electrical_relay',
     domain: 'electrical',
@@ -599,8 +600,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'timer_relay_on_delay',
-    fluidsim45Id: 'FS45_PENDING_TIMER_ON',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'E_K008',
+    fluidsim45IdVerified: true,
     displayName: 'ON-Delay Timer Relay (T1..Tn)',
     category: 'electrical_relay',
     domain: 'electrical',
@@ -637,8 +638,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'electrical_counter',
-    fluidsim45Id: 'FS45_PENDING_COUNTER',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'E_P010',
+    fluidsim45IdVerified: true,
     displayName: 'Electrical Preset Counter (C1..Cn)',
     category: 'electrical_relay',
     domain: 'electrical',
@@ -658,8 +659,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'valve_solenoid',
-    fluidsim45Id: 'FS45_PENDING_SOLENOID',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'E_Y001',
+    fluidsim45IdVerified: true,
     displayName: 'Valve Solenoid Coil (Y1..Yn)',
     category: 'electrical_actuator',
     domain: 'electrical',
@@ -675,8 +676,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'indicator_lamp',
-    fluidsim45Id: 'FS45_PENDING_LAMP',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'lampe',
+    fluidsim45IdVerified: true,
     displayName: 'Indicator Lamp (H1..Hn)',
     category: 'electrical_actuator',
     domain: 'electrical',

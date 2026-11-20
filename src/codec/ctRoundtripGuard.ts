@@ -1,12 +1,41 @@
 import type { CircuitDocument } from '../contracts/circuit';
 import { EngineeringError } from '../contracts/errors';
 import { parseCircuitBuffer } from './ctParser';
+import { computeSemanticFingerprint, type PreservedCtSections } from './ctTextCodec';
 
 export interface RoundtripCheckResult {
   passed: boolean;
   componentCount: number;
   connectionCount: number;
   preservedRawAst: boolean;
+}
+
+function checkRawAstPreserved(expected: CircuitDocument, reparsed: CircuitDocument): boolean {
+  if (expected.rawAst === undefined) {
+    return true;
+  }
+
+  const expSec = expected.rawAst.preservedSections as Partial<PreservedCtSections> | undefined;
+  const repSec = reparsed.rawAst?.preservedSections as Partial<PreservedCtSections> | undefined;
+
+  if (expSec?.kind === 'fluidsim-4.5-ct') {
+    if (repSec?.kind !== 'fluidsim-4.5-ct') return false;
+    if (JSON.stringify(repSec.headerLinesB64) !== JSON.stringify(expSec.headerLinesB64)) return false;
+    if (repSec.previewBlockB64 !== expSec.previewBlockB64) return false;
+    if ((repSec.fsPreviewBlock ?? '') !== (expSec.fsPreviewBlock ?? '')) return false;
+    if (repSec.trailerText !== expSec.trailerText) return false;
+
+    // If the document was NOT semantically modified since parse, verify verbatim ctBody preservation
+    if (
+      expSec.originalSemanticFingerprint &&
+      computeSemanticFingerprint(expected) === expSec.originalSemanticFingerprint
+    ) {
+      if (repSec.originalCtBody !== expSec.originalCtBody) return false;
+    }
+    return true;
+  }
+
+  return JSON.stringify(reparsed.rawAst) === JSON.stringify(expected.rawAst);
 }
 
 /**
@@ -65,9 +94,7 @@ export function verifyCodecRoundtrip(
     }
   }
 
-  const preservedRawAst =
-    expected.rawAst === undefined ||
-    JSON.stringify(reparsed.rawAst) === JSON.stringify(expected.rawAst);
+  const preservedRawAst = checkRawAstPreserved(expected, reparsed);
 
   if (!preservedRawAst) {
     throw new EngineeringError({

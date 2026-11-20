@@ -120,9 +120,9 @@ test('end-to-end stdio MCP server exercises full autonomous agent loop without s
     assert.equal(simManual.ok, true);
     assert.deepEqual(simManual.data?.observedSequence, ['A+', 'A-']);
 
-    // 4. One-shot declarative generator + read tools + auto-layout + verify_sequence
+    // 4. One-shot declarative generator directly to native FluidSIM 4.5 .ct + read tools + auto-layout + verify_sequence
     const genRes = await callJsonTool(client, 'circuit_generate_from_spec', {
-      path: 'seq_abba.fsim.json',
+      path: 'seq_abba.ct',
       actuators: [{ label: 'A', strokeMm: 100 }, { label: 'B', strokeMm: 100 }],
       sequence: ['A+', 'B+', 'B-', 'A-'],
       controlMethod: 'electro-pneumatic-step-chain',
@@ -133,34 +133,43 @@ test('end-to-end stdio MCP server exercises full autonomous agent loop without s
     assert.equal((genRes.data?.validation as { valid: boolean }).valid, true);
     assert.equal((genRes.data?.sequenceVerification as { passed: boolean }).passed, true);
 
-    const inspectRes = await callJsonTool(client, 'circuit_inspect', { path: 'seq_abba.fsim.json' });
+    // Copy a real golden FluidSIM .ct fixture into the workspace and inspect it via MCP
+    fs.copyFileSync(
+      path.resolve(REPO_ROOT, 'fixtures', 'golden', '04_electro_pneumatic_abba.ct'),
+      path.join(workspace, 'golden_electro.ct'),
+    );
+    const goldenInspect = await callJsonTool(client, 'circuit_inspect', { path: 'golden_electro.ct' });
+    assert.equal(goldenInspect.ok, true);
+    assert.equal((goldenInspect.data?.actuators as unknown[]).length, 2);
+
+    const inspectRes = await callJsonTool(client, 'circuit_inspect', { path: 'seq_abba.ct' });
     assert.equal(inspectRes.ok, true);
     assert.equal((inspectRes.data?.actuators as unknown[]).length, 2);
 
     const netRes = await callJsonTool(client, 'circuit_export_netlist', {
-      path: 'seq_abba.fsim.json',
+      path: 'seq_abba.ct',
       format: 'compact-text',
     });
     assert.equal(netRes.ok, true);
     assert.ok(String(netRes.data?.netlist).includes('COMPONENTS:'));
 
-    const mapRes = await callJsonTool(client, 'circuit_get_label_map', { path: 'seq_abba.fsim.json' });
+    const mapRes = await callJsonTool(client, 'circuit_get_label_map', { path: 'seq_abba.ct' });
     assert.equal(mapRes.ok, true);
     assert.equal((mapRes.data?.brokenBindings as unknown[]).length, 0);
 
     const queryRes = await callJsonTool(client, 'circuit_query_components', {
-      path: 'seq_abba.fsim.json',
+      path: 'seq_abba.ct',
       category: 'directional_valve',
     });
     assert.equal(queryRes.ok, true);
     assert.ok((queryRes.data?.components as unknown[]).length >= 2);
 
-    const layoutRes = await callJsonTool(client, 'circuit_auto_layout', { path: 'seq_abba.fsim.json' });
+    const layoutRes = await callJsonTool(client, 'circuit_auto_layout', { path: 'seq_abba.ct' });
     assert.equal(layoutRes.ok, true);
     assert.equal(layoutRes.data?.postconditionPassed, true);
 
     const verifyRes = await callJsonTool(client, 'circuit_verify_sequence', {
-      path: 'seq_abba.fsim.json',
+      path: 'seq_abba.ct',
       expectedSequence: ['A+', 'B+', 'B-', 'A-'],
       inputs: [{ label: 'S1', action: 'press', atMs: 100, durationMs: 150 }],
       durationMs: 6000,
@@ -170,7 +179,7 @@ test('end-to-end stdio MCP server exercises full autonomous agent loop without s
 
     const wsStatus = await callJsonTool(client, 'workspace_status');
     assert.equal(wsStatus.ok, true);
-    assert.equal((wsStatus.data?.files as unknown[]).length, 2);
+    assert.equal((wsStatus.data?.files as unknown[]).length, 3);
   } finally {
     await client.close();
     fs.rmSync(workspace, { recursive: true, force: true });
@@ -190,7 +199,7 @@ test('read-only stdio server rejects authoring mutations with structured AccessD
   try {
     await client.connect(transport);
     const res = await callJsonTool(client, 'circuit_create', {
-      path: 'blocked.fsim.json',
+      path: 'blocked.ct',
       template: 'blank',
     });
     assert.equal(res.ok, false);
@@ -207,10 +216,18 @@ test('CLI doctor and print-config produce valid configs for all supported MCP ho
     cwd: REPO_ROOT,
     encoding: 'utf8',
   });
-  const doctor = JSON.parse(doctorRaw) as { status: string; catalog: { ok: boolean; count: number } };
+  const doctor = JSON.parse(doctorRaw) as {
+    status: string;
+    catalog: { ok: boolean; count: number; verifiedFluidsim45Count: number };
+    codec: { irJsonRoundtripOk: boolean; nativeCt45RoundtripOk: boolean; nativeCt45Ready: boolean };
+  };
   assert.equal(doctor.status, 'ok');
   assert.equal(doctor.catalog.ok, true);
   assert.ok(doctor.catalog.count >= 25);
+  assert.ok(doctor.catalog.verifiedFluidsim45Count >= 20);
+  assert.equal(doctor.codec.irJsonRoundtripOk, true);
+  assert.equal(doctor.codec.nativeCt45RoundtripOk, true);
+  assert.equal(doctor.codec.nativeCt45Ready, true);
 
   for (const host of ['vscode', 'antigravity', 'gemini-cli', 'claude'] as const) {
     const snippet = buildHostConfigSnippet(host, '/tmp/ws', 'authoring', REPO_ROOT);

@@ -1,5 +1,6 @@
 import type { CircuitDocument } from '../contracts/circuit';
-import { buildPhase0CtGateError } from './ctParser';
+import { encodeCtContainer } from './ctBinaryCodec';
+import { serializeDocumentToCtContainer } from './ctTextCodec';
 
 export interface SerializeOptions {
   targetPath?: string;
@@ -7,8 +8,8 @@ export interface SerializeOptions {
 }
 
 /**
- * Serializes a CircuitDocument deterministically while preserving rawAst & rawMetadata.
- * Native FluidSIM 4.5 .ct emission is strictly gated until Phase 0 golden fixtures are verified.
+ * Serializes a CircuitDocument deterministically into either native FluidSIM 4.5 `.ct`
+ * binary format or `.fsim.json` semantic IR while preserving rawAst & rawMetadata.
  */
 export function serializeCircuitDocument(
   document: CircuitDocument,
@@ -20,7 +21,8 @@ export function serializeCircuitDocument(
     (targetPath.toLowerCase().endsWith('.ct') ? 'fluidsim-4.5-ct' : 'fsim-ir-json');
 
   if (targetFormat === 'fluidsim-4.5-ct') {
-    throw buildPhase0CtGateError(targetPath, 'serialize');
+    const container = serializeDocumentToCtContainer(document);
+    return encodeCtContainer(container);
   }
 
   const canonical: CircuitDocument = {

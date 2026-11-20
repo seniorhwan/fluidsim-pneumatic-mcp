@@ -106,11 +106,13 @@ export function handleCatalogSearch(
 
 export function handleFluidsimDoctor(ctx: McpToolContext) {
   const catalogCheck = checkCatalogIntegrity();
+  const verifiedCatalogCount = PNEUMATICS_45_CATALOG.filter((c) => c.fluidsim45IdVerified).length;
   const goldenStatus = getGoldenFixtureStatus(ctx.repoRoot);
   const workspaceWritable = ctx.guard.checkWritable();
 
-  // Headless codec & validator self-test in memory
-  let codecSelfTestPassed = false;
+  // Headless codec & validator self-test in memory (both .fsim.json and native .ct)
+  let irJsonSelfTestPassed = false;
+  let nativeCtSelfTestPassed = false;
   let codecError: string | undefined;
   try {
     const sampleDoc = generateCircuitFromSpec({
@@ -121,16 +123,21 @@ export function handleFluidsimDoctor(ctx: McpToolContext) {
       startMode: 'single-cycle',
       includeEStop: false,
     });
-    const bytes = serializeCircuitDocument(sampleDoc, { format: 'fsim-ir-json' });
-    const rt = verifyCodecRoundtrip(sampleDoc, bytes, 'doctor_selftest.fsim.json');
     const val = validateCircuitStatic(sampleDoc);
-    codecSelfTestPassed = rt.passed && val.valid;
+
+    const irBytes = serializeCircuitDocument(sampleDoc, { format: 'fsim-ir-json' });
+    const irRt = verifyCodecRoundtrip(sampleDoc, irBytes, 'doctor_selftest.fsim.json');
+    irJsonSelfTestPassed = irRt.passed && val.valid;
+
+    const ctBytes = serializeCircuitDocument(sampleDoc, { format: 'fluidsim-4.5-ct' });
+    const ctRt = verifyCodecRoundtrip(sampleDoc, ctBytes, 'doctor_selftest.ct');
+    nativeCtSelfTestPassed = ctRt.passed && val.valid;
   } catch (err) {
     codecError = err instanceof Error ? err.message : String(err);
   }
 
   return {
-    status: catalogCheck.ok && codecSelfTestPassed ? 'ok' : 'degraded',
+    status: catalogCheck.ok && irJsonSelfTestPassed && nativeCtSelfTestPassed ? 'ok' : 'degraded',
     serverVersion: ctx.serverVersion,
     nodeVersion: process.version,
     platform: process.platform,
@@ -139,10 +146,14 @@ export function handleFluidsimDoctor(ctx: McpToolContext) {
       root: ctx.guard.root,
       writable: workspaceWritable,
     },
-    catalog: catalogCheck,
+    catalog: {
+      ...catalogCheck,
+      verifiedFluidsim45Count: verifiedCatalogCount,
+    },
     codec: {
-      irJsonRoundtripOk: codecSelfTestPassed,
-      nativeCt45Ready: goldenStatus.readyForPhase1,
+      irJsonRoundtripOk: irJsonSelfTestPassed,
+      nativeCt45RoundtripOk: nativeCtSelfTestPassed,
+      nativeCt45Ready: goldenStatus.readyForPhase1 && nativeCtSelfTestPassed,
       goldenFixturesPresent: goldenStatus.present,
       goldenFixturesMissing: goldenStatus.missing,
       ...(codecError ? { error: codecError } : {}),

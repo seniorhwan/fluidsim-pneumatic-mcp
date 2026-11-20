@@ -1,10 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { EngineeringError } from '../contracts/errors';
+import { isFluidSimCtBuffer } from './ctBinaryCodec';
 
 export type DetectedFormat =
   | 'fsim-ir-json'
-  | 'fluidsim-4.5-ct-pending-golden'
+  | 'fluidsim-4.5-ct'
   | 'unknown';
 
 export interface DetectionResult {
@@ -16,12 +17,12 @@ export interface DetectionResult {
 }
 
 export const REQUIRED_GOLDEN_FIXTURES = [
-  '01_empty.ct',
-  '02_air_source.ct',
-  '03_direct_3_2_sac.ct',
-  '04_indirect_5_2_dac.ct',
-  '05_electro_latch.ct',
-  '06_logic_timer.ct',
+  '01_direct_indirect_cylinders.ct',
+  '02_speed_control_throttle.ct',
+  '03_pneumatic_abba_sequence.ct',
+  '04_electro_pneumatic_abba.ct',
+  '05_timer_counter_electro.ct',
+  '06_electrical_latch_legacy.ct',
 ] as const;
 
 export function getGoldenFixtureStatus(repoRoot = process.cwd()): {
@@ -74,6 +75,17 @@ export function detectCircuitFormat(buffer: Buffer, filePath = ''): DetectionRes
     });
   }
 
+  // Empirically verified Festo FluidSIM 4.x/4.5 native .ct container signature
+  if (isFluidSimCtBuffer(buffer)) {
+    return {
+      format: 'fluidsim-4.5-ct',
+      detectedVersion: '4.5',
+      encoding: 'binary',
+      byteLength,
+      magicHex,
+    };
+  }
+
   const utf8Head = buffer.subarray(0, Math.min(buffer.length, 512)).toString('utf8').trimStart();
   if (utf8Head.startsWith('{')) {
     try {
@@ -112,31 +124,11 @@ export function detectCircuitFormat(buffer: Buffer, filePath = ''): DetectionRes
     });
   }
 
-  // Check null-byte density for binary detection
-  let nullBytes = 0;
-  const sampleLen = Math.min(buffer.length, 2048);
-  for (let i = 0; i < sampleLen; i++) {
-    if (buffer[i] === 0) nullBytes++;
-  }
-  const encoding: 'utf8' | 'latin1' | 'binary' =
-    nullBytes > 0 ? 'binary' : utf8Head.includes('\uFFFD') ? 'latin1' : 'utf8';
-
-  const lowerPath = filePath.toLowerCase();
-  if (lowerPath.endsWith('.ct')) {
-    return {
-      format: 'fluidsim-4.5-ct-pending-golden',
-      detectedVersion: null,
-      encoding,
-      byteLength,
-      magicHex,
-    };
-  }
-
   throw new EngineeringError({
     category: 'UnsupportedFormatVersion',
     code: 'UNRECOGNIZED_CIRCUIT_FORMAT',
     message: `Could not recognize format of "${filePath || '<buffer>'}" (magic=${magicHex}).`,
     offendingIds: filePath ? [filePath] : [],
-    suggestedFix: 'Provide a valid .fsim.json circuit IR file or supply FluidSIM 4.5 golden .ct fixtures to unlock the .ct codec.',
+    suggestedFix: 'Provide a valid Festo FluidSIM Pneumatics 4.5 .ct file or a .fsim.json circuit IR file.',
   });
 }
