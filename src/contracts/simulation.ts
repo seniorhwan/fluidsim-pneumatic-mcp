@@ -112,6 +112,10 @@ export interface SequenceAssertion {
   stepMs?: number;
   /** Optional maximum cycle completion time in ms. */
   maxCycleMs?: number;
+  /** When true, accepts repeating copies of expectedSequence (for continuous startMode). */
+  allowRepeatCycles?: boolean;
+  /** Minimum full cycles required when allowRepeatCycles is true (default 1). */
+  minCycles?: number;
   /** Optional E-stop verification check mid-cycle. */
   eStopCheck?: {
     label: string;
@@ -126,6 +130,7 @@ export interface SequenceVerificationResult {
   observedSequence: string[];
   mismatchIndex: number | null;
   cycleTimeMs: number | null;
+  cyclesObserved?: number;
   diagnostics: SimDiagnostic[];
   failureSummary?: string;
   eStopVerified?: boolean;

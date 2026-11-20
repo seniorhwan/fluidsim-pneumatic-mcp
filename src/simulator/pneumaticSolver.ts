@@ -12,6 +12,8 @@ export interface CylinderRuntimeState {
   lastMotionState: 'idle' | 'extending' | 'retracting';
   lastEndReached: 'retracted' | 'extended' | 'mid';
   activeMarkers: string[];
+  exhaustBlockedReported: boolean;
+  overloadStallReported: boolean;
 }
 
 export interface ValveRuntimeState {
@@ -83,6 +85,8 @@ export function createInitialPneumaticState(doc: CircuitDocument): PneumaticStat
               ? 'extended'
               : 'mid',
         activeMarkers,
+        exhaustBlockedReported: false,
+        overloadStallReported: false,
       };
     } else if (
       c.type === 'valve_3_2' ||
@@ -94,6 +98,12 @@ export function createInitialPneumaticState(doc: CircuitDocument): PneumaticStat
       if (c.type === 'valve_5_3') {
         initialState = 'center';
       } else if (c.params.initialState === 'left') {
+        initialState = 'left';
+      } else if (
+        c.params.initialState !== 'right' &&
+        c.leftActuation?.type === 'spring' &&
+        c.rightActuation?.type !== 'spring'
+      ) {
         initialState = 'left';
       }
       valves[c.id] = {
@@ -120,6 +130,60 @@ export function createInitialPneumaticState(doc: CircuitDocument): PneumaticStat
   };
 }
 
+export interface PneumaticStaticTopology {
+  rootByPort: Map<string, string>;
+  netsByRoot: Map<string, NetInfo>;
+}
+
+export function buildPneumaticStaticTopology(doc: CircuitDocument): PneumaticStaticTopology {
+  const parent = new Map<string, string>();
+  const findRaw = (x: string): string => {
+    let cur = x;
+    while (parent.has(cur) && parent.get(cur) !== cur) {
+      cur = parent.get(cur)!;
+    }
+    let walk = x;
+    while (parent.has(walk) && parent.get(walk) !== cur) {
+      const next = parent.get(walk)!;
+      parent.set(walk, cur);
+      walk = next;
+    }
+    if (!parent.has(cur)) parent.set(cur, cur);
+    return cur;
+  };
+  const union = (a: string, b: string): void => {
+    const ra = findRaw(a);
+    const rb = findRaw(b);
+    if (ra !== rb) parent.set(rb, ra);
+  };
+
+  for (const e of doc.connections) {
+    if (e.domain !== 'pneumatic') continue;
+    union(pKey(e.from.componentId, e.from.port), pKey(e.to.componentId, e.to.port));
+  }
+  for (const c of doc.components) {
+    if (c.type === 'pneumatic_junction') {
+      union(pKey(c.id, '1'), pKey(c.id, '2'));
+      union(pKey(c.id, '1'), pKey(c.id, '3'));
+      union(pKey(c.id, '1'), pKey(c.id, '4'));
+    }
+  }
+
+  const rootByPort = new Map<string, string>();
+  const netsByRoot = new Map<string, NetInfo>();
+  for (const k of parent.keys()) {
+    const r = findRaw(k);
+    rootByPort.set(k, r);
+    let info = netsByRoot.get(r);
+    if (!info) {
+      info = { root: r, members: [] };
+      netsByRoot.set(r, info);
+    }
+    info.members.push(k);
+  }
+  return { rootByPort, netsByRoot };
+}
+
 export interface PneumaticTickInput {
   doc: CircuitDocument;
   state: PneumaticState;
@@ -129,6 +193,7 @@ export interface PneumaticTickInput {
   pressedInputs: Set<string>;
   solenoidsByLabel: Record<string, boolean>;
   supplyPressureOverrideBar?: number;
+  topology?: PneumaticStaticTopology;
 }
 
 export interface PneumaticMotionEvent {
@@ -155,56 +220,23 @@ interface NetInfo {
 }
 
 export function stepPneumaticSolver(input: PneumaticTickInput): PneumaticTickOutput {
-  const { doc, state, stepMs, tick, timeMs, pressedInputs, solenoidsByLabel, supplyPressureOverrideBar } =
-    input;
+  const {
+    doc,
+    state,
+    stepMs,
+    tick,
+    timeMs,
+    pressedInputs,
+    solenoidsByLabel,
+    supplyPressureOverrideBar,
+    topology,
+  } = input;
   const diagnostics: SimDiagnostic[] = [];
   const events: PneumaticMotionEvent[] = [];
 
-  // Build static hose/junction nets via Union-Find
-  const parent = new Map<string, string>();
-  const find = (x: string): string => {
-    let cur = x;
-    while (parent.has(cur) && parent.get(cur) !== cur) {
-      cur = parent.get(cur)!;
-    }
-    let walk = x;
-    while (parent.has(walk) && parent.get(walk) !== cur) {
-      const next = parent.get(walk)!;
-      parent.set(walk, cur);
-      walk = next;
-    }
-    if (!parent.has(cur)) parent.set(cur, cur);
-    return cur;
-  };
-  const union = (a: string, b: string): void => {
-    const ra = find(a);
-    const rb = find(b);
-    if (ra !== rb) parent.set(rb, ra);
-  };
-
-  for (const e of doc.connections) {
-    if (e.domain !== 'pneumatic') continue;
-    union(pKey(e.from.componentId, e.from.port), pKey(e.to.componentId, e.to.port));
-  }
-  for (const c of doc.components) {
-    if (c.type === 'pneumatic_junction') {
-      union(pKey(c.id, '1'), pKey(c.id, '2'));
-      union(pKey(c.id, '1'), pKey(c.id, '3'));
-      union(pKey(c.id, '1'), pKey(c.id, '4'));
-    }
-  }
-
-  // Group port keys by net root
-  const netsByRoot = new Map<string, NetInfo>();
-  for (const k of parent.keys()) {
-    const r = find(k);
-    let info = netsByRoot.get(r);
-    if (!info) {
-      info = { root: r, members: [] };
-      netsByRoot.set(r, info);
-    }
-    info.members.push(k);
-  }
+  const topo = topology ?? buildPneumaticStaticTopology(doc);
+  const { rootByPort, netsByRoot } = topo;
+  const find = (x: string): string => rootByPort.get(x) ?? x;
 
   const getPortP = (cid: string, port: string): number => {
     const k = pKey(cid, port);
@@ -528,7 +560,15 @@ export function stepPneumaticSolver(input: PneumaticTickInput): PneumaticTickOut
     const targetRoot = find(pKey(cylId, cylPort));
     let factor = 1.0;
 
+    let quickExhaustBoost = false;
     for (const c of doc.components) {
+      if (c.type === 'quick_exhaust_valve' && mode === 'exhaust') {
+        const r2 = find(pKey(c.id, '2'));
+        if (r2 === targetRoot && netExhaustConnected.get(find(pKey(c.id, '3'))) === true) {
+          quickExhaustBoost = true;
+        }
+        continue;
+      }
       if (c.type !== 'flow_control_one_way') continue;
       const r1 = find(pKey(c.id, '1'));
       const r2 = find(pKey(c.id, '2'));
@@ -546,6 +586,9 @@ export function stepPneumaticSolver(input: PneumaticTickInput): PneumaticTickOut
       if (flowDir !== freeDir) {
         factor = Math.min(factor, Math.max(0.05, openingPct / 100));
       }
+    }
+    if (quickExhaustBoost) {
+      factor = Math.max(factor, 1.35);
     }
     return factor;
   };
@@ -621,6 +664,50 @@ export function stepPneumaticSolver(input: PneumaticTickInput): PneumaticTickOut
     }
 
     let velocity = 0;
+    const wantsExtend = netForceN > 5 && cs.positionMm < cs.strokeMm - 0.1;
+    const wantsRetract = netForceN < -5 && cs.positionMm > 0.1;
+    const blockedWhileMoving = exhaustBlocked && (wantsExtend || wantsRetract);
+
+    if (blockedWhileMoving && !cs.exhaustBlockedReported) {
+      cs.exhaustBlockedReported = true;
+      diagnostics.push({
+        severity: 'error',
+        category: 'PneumaticRuleViolation',
+        code: 'EXHAUST_BLOCKED',
+        tick,
+        timeMs,
+        message: `Cylinder ${c.id} (${cs.label}) cannot ${wantsExtend ? 'extend' : 'retract'} at t=${timeMs}ms because its exhausting chamber has no path to an exhaust_silencer.`,
+        offendingIds: [c.id],
+        suggestedFix:
+          'Connect exhaust_silencer terminators to valve exhaust ports (3 / 5) and verify the directional valve opens an exhaust path.',
+      });
+    } else if (!blockedWhileMoving) {
+      cs.exhaustBlockedReported = false;
+    }
+
+    const pBCheck = c.type === 'cylinder_double_acting' ? getPortP(c.id, 'B') : 0;
+    const tryingExtend = pA >= 1.5 && pBCheck < 0.5 && cs.positionMm < cs.strokeMm - 0.1;
+    const tryingRetract = pBCheck >= 1.5 && pA < 0.5 && cs.positionMm > 0.1;
+    const stalledByLoad =
+      extLoadN > 0 &&
+      ((tryingExtend && netForceN <= 5) || (tryingRetract && netForceN >= -5));
+    if (stalledByLoad && !cs.overloadStallReported) {
+      cs.overloadStallReported = true;
+      diagnostics.push({
+        severity: 'error',
+        category: 'PneumaticRuleViolation',
+        code: 'ACTUATOR_STALLED_OVERLOAD',
+        tick,
+        timeMs,
+        message: `Cylinder ${c.id} (${cs.label}) stalled under externalLoadN=${extLoadN}N at t=${timeMs}ms (insufficient pneumatic force).`,
+        offendingIds: [c.id],
+        suggestedFix:
+          'Increase cylinder pistonDiameterMm, raise air_source pressureBar, or reduce externalLoadN.',
+      });
+    } else if (!stalledByLoad) {
+      cs.overloadStallReported = false;
+    }
+
     if (!exhaustBlocked && Math.abs(netForceN) > 5) {
       const forceRatio = Math.min(1.5, Math.abs(netForceN) / refForceN);
       velocity = Math.sign(netForceN) * NOMINAL_MAX_SPEED_MM_S * speedScale * forceRatio * speedFactor;

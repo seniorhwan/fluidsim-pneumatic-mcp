@@ -66,6 +66,52 @@ function pKey(cid: string, port: string): string {
   return `${cid}::${port}`;
 }
 
+export interface ElectricalStaticTopology {
+  elecComps: ComponentNode[];
+  rails24: ComponentNode[];
+  rails0: ComponentNode[];
+  baseAdj: Map<string, string[]>;
+}
+
+function addAdjEdge(g: Map<string, string[]>, a: string, b: string): void {
+  let la = g.get(a);
+  if (!la) {
+    la = [];
+    g.set(a, la);
+  }
+  la.push(b);
+  let lb = g.get(b);
+  if (!lb) {
+    lb = [];
+    g.set(b, lb);
+  }
+  lb.push(a);
+}
+
+export function buildElectricalStaticTopology(doc: CircuitDocument): ElectricalStaticTopology {
+  const elecComps = doc.components.filter((c) => isElectricalComponent(c.type));
+  const rails24 = elecComps.filter((c) => c.type === 'power_24v');
+  const rails0 = elecComps.filter((c) => c.type === 'power_0v');
+  const baseAdj = new Map<string, string[]>();
+
+  for (const e of doc.connections) {
+    if (e.domain !== 'electrical') continue;
+    addAdjEdge(baseAdj, pKey(e.from.componentId, e.from.port), pKey(e.to.componentId, e.to.port));
+  }
+  for (const c of elecComps) {
+    if (c.type === 'electrical_junction') {
+      const ports = ['1', '2', '3', '4'];
+      for (let i = 0; i < ports.length; i++) {
+        for (let j = i + 1; j < ports.length; j++) {
+          addAdjEdge(baseAdj, pKey(c.id, ports[i]), pKey(c.id, ports[j]));
+        }
+      }
+    }
+  }
+
+  return { elecComps, rails24, rails0, baseAdj };
+}
+
 export interface ElectricalTickInput {
   doc: CircuitDocument;
   state: ElectricalState;
@@ -76,6 +122,7 @@ export interface ElectricalTickInput {
   pressedInputs: Set<string>;
   /** Currently active cylinder distance-rule sensor labels (e.g., "a0", "b1"). */
   activeSensorLabels: Set<string>;
+  topology?: ElectricalStaticTopology;
 }
 
 export interface ElectricalTickOutput {
@@ -85,48 +132,15 @@ export interface ElectricalTickOutput {
 }
 
 export function stepElectricalSolver(input: ElectricalTickInput): ElectricalTickOutput {
-  const { doc, state, stepMs, tick, timeMs, pressedInputs, activeSensorLabels } = input;
+  const { doc, state, stepMs, tick, timeMs, pressedInputs, activeSensorLabels, topology } = input;
   const diagnostics: SimDiagnostic[] = [];
 
-  const elecComps = doc.components.filter((c) => isElectricalComponent(c.type));
+  const topo = topology ?? buildElectricalStaticTopology(doc);
+  const { elecComps, rails24, rails0, baseAdj } = topo;
   if (elecComps.length === 0) {
     return { diagnostics, shortCircuitDetected: false, oscillationDetected: false };
   }
-
-  const rails24 = elecComps.filter((c) => c.type === 'power_24v');
-  const rails0 = elecComps.filter((c) => c.type === 'power_0v');
-
-  // Prebuild static electrical wire adjacency (wires + junctions)
-  const baseAdj = new Map<string, string[]>();
-  const addEdge = (g: Map<string, string[]>, a: string, b: string): void => {
-    let la = g.get(a);
-    if (!la) {
-      la = [];
-      g.set(a, la);
-    }
-    la.push(b);
-    let lb = g.get(b);
-    if (!lb) {
-      lb = [];
-      g.set(b, lb);
-    }
-    lb.push(a);
-  };
-
-  for (const e of doc.connections) {
-    if (e.domain !== 'electrical') continue;
-    addEdge(baseAdj, pKey(e.from.componentId, e.from.port), pKey(e.to.componentId, e.to.port));
-  }
-  for (const c of elecComps) {
-    if (c.type === 'electrical_junction') {
-      const ports = ['1', '2', '3', '4'];
-      for (let i = 0; i < ports.length; i++) {
-        for (let j = i + 1; j < ports.length; j++) {
-          addEdge(baseAdj, pKey(c.id, ports[i]), pKey(c.id, ports[j]));
-        }
-      }
-    }
-  }
+  const addEdge = addAdjEdge;
 
   const isPressed = (c: ComponentNode): boolean => {
     const manual = pressedInputs.has(c.id) || (c.label !== undefined && pressedInputs.has(c.label));
@@ -278,6 +292,7 @@ export function stepElectricalSolver(input: ElectricalTickInput): ElectricalTick
   }
 
   // Update stateful time/count elements once per simulation tick
+  let timerOrCounterToggled = false;
   for (const c of elecComps) {
     if (c.type === 'timer_relay_on_delay') {
       const powered = !shortCircuitDetected && isPowered(lastPass.has24, lastPass.has0, c.id, 'A1', 'A2');
@@ -288,6 +303,7 @@ export function stepElectricalSolver(input: ElectricalTickInput): ElectricalTick
         state.timerElapsedMs[c.id] = 0;
       }
       const active = powered && state.timerElapsedMs[c.id] >= delayMs;
+      if (state.relayCoilById[c.id] !== active) timerOrCounterToggled = true;
       state.relayCoilById[c.id] = active;
       if (c.label) state.coilOutputsByLabel[c.label] = active;
     } else if (c.type === 'timer_relay_off_delay') {
@@ -299,6 +315,7 @@ export function stepElectricalSolver(input: ElectricalTickInput): ElectricalTick
         state.offDelayRemainingMs[c.id] = Math.max(0, state.offDelayRemainingMs[c.id] - stepMs);
       }
       const active = powered || (state.offDelayRemainingMs[c.id] ?? 0) > 0;
+      if (state.relayCoilById[c.id] !== active) timerOrCounterToggled = true;
       state.relayCoilById[c.id] = active;
       if (c.label) state.coilOutputsByLabel[c.label] = active;
     } else if (c.type === 'electrical_counter') {
@@ -312,9 +329,38 @@ export function stepElectricalSolver(input: ElectricalTickInput): ElectricalTick
       }
       state.counterPrevPulse[c.id] = pulse;
       const active = (state.counterCounts[c.id] ?? 0) >= preset;
+      if (state.relayCoilById[c.id] !== active) timerOrCounterToggled = true;
       state.relayCoilById[c.id] = active;
       if (c.label) state.coilOutputsByLabel[c.label] = active;
-    } else if (c.type === 'valve_solenoid') {
+    }
+  }
+
+  // If a timer or counter flipped on this tick, propagate immediately to dependent relays before evaluating outputs
+  if (timerOrCounterToggled && !shortCircuitDetected && !oscillationDetected) {
+    for (let iter = 0; iter < 6; iter++) {
+      lastPass = evaluatePass();
+      if (lastPass.shorted) {
+        shortCircuitDetected = true;
+        break;
+      }
+      let changed = false;
+      for (const c of elecComps) {
+        if (c.type === 'relay_coil') {
+          const powered = isPowered(lastPass.has24, lastPass.has0, c.id, 'A1', 'A2');
+          if (state.relayCoilById[c.id] !== powered) {
+            state.relayCoilById[c.id] = powered;
+            if (c.label) state.coilOutputsByLabel[c.label] = powered;
+            changed = true;
+          }
+        }
+      }
+      if (!changed) break;
+    }
+  }
+
+  // Evaluate solenoids and indicator lamps against converged circuit state
+  for (const c of elecComps) {
+    if (c.type === 'valve_solenoid') {
       const powered = !shortCircuitDetected && isPowered(lastPass.has24, lastPass.has0, c.id, 'A1', 'A2');
       state.solenoidsById[c.id] = powered;
       if (c.label) state.solenoidsByLabel[c.label] = powered;

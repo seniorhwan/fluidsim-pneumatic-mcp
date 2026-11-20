@@ -8,8 +8,16 @@ import type {
   SimResult,
   SimSample,
 } from '../contracts/simulation';
-import { createInitialElectricalState, stepElectricalSolver } from './electricalSolver';
-import { createInitialPneumaticState, stepPneumaticSolver } from './pneumaticSolver';
+import {
+  buildElectricalStaticTopology,
+  createInitialElectricalState,
+  stepElectricalSolver,
+} from './electricalSolver';
+import {
+  buildPneumaticStaticTopology,
+  createInitialPneumaticState,
+  stepPneumaticSolver,
+} from './pneumaticSolver';
 
 export function simulateCircuit(doc: CircuitDocument, options: SimOptions = {}): SimResult {
   const durationMs = Math.max(50, Math.min(options.durationMs ?? 5000, 60_000));
@@ -18,6 +26,8 @@ export function simulateCircuit(doc: CircuitDocument, options: SimOptions = {}):
   const includeSamples = options.includeSamples ?? false;
   const sampleIntervalMs = Math.max(stepMs, options.sampleIntervalMs ?? 100);
 
+  const elecTopology = buildElectricalStaticTopology(doc);
+  const pneuTopology = buildPneumaticStaticTopology(doc);
   const elecState = createInitialElectricalState(doc);
   const pneuState = createInitialPneumaticState(doc);
 
@@ -138,6 +148,7 @@ export function simulateCircuit(doc: CircuitDocument, options: SimOptions = {}):
       timeMs,
       pressedInputs: pressedThisTick,
       activeSensorLabels: pneuState.activeSensorLabels,
+      topology: elecTopology,
     });
 
     for (const d of elecOut.diagnostics) {
@@ -197,6 +208,7 @@ export function simulateCircuit(doc: CircuitDocument, options: SimOptions = {}):
       pressedInputs: pressedThisTick,
       solenoidsByLabel: elecState.solenoidsByLabel,
       supplyPressureOverrideBar: options.supplyPressureBar,
+      topology: pneuTopology,
     });
 
     for (const d of pneuOut.diagnostics) {

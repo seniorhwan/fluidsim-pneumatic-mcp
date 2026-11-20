@@ -239,3 +239,100 @@ test('CLI doctor and print-config produce valid configs for all supported MCP ho
   assert.ok(codexToml.includes('[mcp_servers.fluidsim_pneumatics_mcp]'));
   assert.ok(codexToml.includes('command = "npx"'));
 });
+
+test('Phase 4 MCP ergonomics & hardening: dryRun preview, continuous simultaneous/dwell .ct, detectedInputs, sampleLimit, and operator max-payload-bytes ceiling', async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'fsim-mcp-p4-'));
+  const transport = new StdioClientTransport({
+    command: TSX_BIN,
+    args: [MCP_ENTRY, 'serve', '--workspace', workspace, '--mode', 'authoring', '--max-payload-bytes', '24000'],
+    cwd: REPO_ROOT,
+    stderr: 'pipe',
+  });
+  const client = new Client({ name: 'test-p4-host', version: '1.0.0' });
+
+  try {
+    await client.connect(transport);
+
+    // 1. Continuous simultaneous + dwell generation directly to native .ct
+    const genCont = await callJsonTool(client, 'circuit_generate_from_spec', {
+      path: 'cont_sim_dwell.ct',
+      actuators: [
+        { label: 'A', type: 'single-acting', strokeMm: 50, throttles: false },
+        { label: 'B', type: 'double-acting', strokeMm: 100, throttles: false },
+      ],
+      sequence: ['A+B+', 'WAIT:250ms', 'A-B-'],
+      controlMethod: 'electro-pneumatic-step-chain',
+      startMode: 'continuous',
+      includeEStop: true,
+    });
+    assert.equal(genCont.ok, true, JSON.stringify(genCont));
+    assert.equal((genCont.data?.validation as { valid: boolean }).valid, true);
+    const seqVer = genCont.data?.sequenceVerification as { passed: boolean; cyclesObserved?: number };
+    assert.equal(seqVer.passed, true, JSON.stringify(seqVer));
+    assert.ok((seqVer.cyclesObserved ?? 0) >= 2, `Expected >=2 continuous cycles, got ${seqVer.cyclesObserved}`);
+
+    // 2. circuit_inspect detectedInputs on generated .ct AND real golden 04_electro_pneumatic_abba.ct
+    const genInspect = await callJsonTool(client, 'circuit_inspect', { path: 'cont_sim_dwell.ct' });
+    assert.equal(genInspect.ok, true);
+    const genInputs = genInspect.data?.detectedInputs as Array<{ label: string; detent: boolean }>;
+    assert.ok(genInputs.some((i) => i.label === 'S1' && i.detent === true));
+    assert.ok(genInputs.some((i) => i.label === 'ESTOP'));
+
+    fs.copyFileSync(
+      path.resolve(REPO_ROOT, 'fixtures', 'golden', '04_electro_pneumatic_abba.ct'),
+      path.join(workspace, 'golden04.ct'),
+    );
+    const g04Inspect = await callJsonTool(client, 'circuit_inspect', { path: 'golden04.ct' });
+    assert.equal(g04Inspect.ok, true);
+    const g04Inputs = g04Inspect.data?.detectedInputs as Array<{ label: string }>;
+    assert.ok(g04Inputs.some((i) => i.label === 'START'));
+    assert.ok(g04Inputs.some((i) => i.label === 'STOP'));
+
+    // 3. circuit_apply_patch dryRun: true returns diff & validation WITHOUT modifying disk
+    const beforeBytes = fs.readFileSync(path.join(workspace, 'cont_sim_dwell.ct'));
+    const dryRes = await callJsonTool(client, 'circuit_apply_patch', {
+      path: 'cont_sim_dwell.ct',
+      dryRun: true,
+      operations: [
+        {
+          op: 'add_component',
+          component: { id: 'DRY_LAMP', type: 'indicator_lamp', label: 'H9', params: { color: 'green' } },
+        },
+      ],
+    });
+    assert.equal(dryRes.ok, true);
+    assert.equal(dryRes.data?.dryRun, true);
+    assert.deepEqual(dryRes.data?.addedComponents, ['DRY_LAMP']);
+    const afterBytes = fs.readFileSync(path.join(workspace, 'cont_sim_dwell.ct'));
+    assert.ok(beforeBytes.equals(afterBytes), 'dryRun: true must not modify file on disk');
+
+    // 4. circuit_simulate includeSamples + sampleLimit caps returned trace samples safely
+    const simRes = await callJsonTool(client, 'circuit_simulate', {
+      path: 'cont_sim_dwell.ct',
+      inputs: [{ label: 'S1', action: 'toggle', atMs: 100 }],
+      durationMs: 2000,
+      stepMs: 20,
+      includeSamples: true,
+      sampleLimit: 5,
+    });
+    assert.equal(simRes.ok, true);
+    const samples = simRes.data?.samples as unknown[];
+    assert.equal(samples.length, 5);
+    assert.equal(simRes.data?.samplesTruncated, true);
+    assert.ok(Number(simRes.data?.samplesTotal) > 5);
+
+    // 5. Operator --max-payload-bytes ceiling (24000) cannot be bypassed by caller passing maxBytes: 262144
+    const ceilingRes = await callJsonTool(client, 'circuit_query_components', {
+      path: 'golden04.ct',
+      limit: 200,
+      maxBytes: 262144,
+    });
+    assert.equal(ceilingRes.ok, true);
+    const pageMeta = ceilingRes.data?.page as { payloadBytes: number };
+    assert.ok(pageMeta.payloadBytes <= 24000, `Payload exceeded server ceiling: ${pageMeta.payloadBytes}`);
+  } finally {
+    await client.close();
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+

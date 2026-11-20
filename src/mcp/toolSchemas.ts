@@ -169,6 +169,7 @@ export const circuitApplyPatchInputShape = {
   path: z.string().min(1).describe('Workspace-relative circuit file path.'),
   operations: z.array(patchOpSchema).min(1).describe('Ordered transactional batch of patch operations.'),
   backup: z.boolean().optional().describe('Create .bak before overwriting.'),
+  dryRun: z.boolean().optional().describe('If true, preflight + validate in memory without writing to disk.'),
 };
 
 export const circuitGenerateFromSpecInputShape = {
@@ -178,13 +179,17 @@ export const circuitGenerateFromSpecInputShape = {
     .array(
       z.object({
         label: z.string().min(1),
+        type: z.enum(['double-acting', 'single-acting']).optional(),
         strokeMm: z.number().min(5).max(2000).optional(),
         throttles: z.boolean().optional(),
         throttleOpeningPct: z.number().min(1).max(100).optional(),
       }),
     )
     .min(1),
-  sequence: z.array(z.string().min(2)).min(1).describe('Target motion sequence, e.g. ["A+", "B+", "B-", "A-"].'),
+  sequence: z
+    .array(z.string().min(2))
+    .min(1)
+    .describe('Target motion sequence, e.g. ["A+", "B+", "B-", "A-"], simultaneous "A+B+", or dwell "WAIT:500ms".'),
   controlMethod: z.enum([
     'direct',
     'pneumatic-cascade',
@@ -211,6 +216,7 @@ export const circuitSimulateInputShape = {
   stepMs: z.number().min(2).max(100).default(10),
   includeSamples: z.boolean().default(false),
   sampleIntervalMs: z.number().min(10).max(5000).optional(),
+  sampleLimit: z.number().int().min(1).max(500).optional().describe('Max sampled snapshots returned when includeSamples=true.'),
   supplyPressureBar: z.number().min(0.5).max(12).optional(),
   cursor: z.string().optional().describe('Pagination cursor over event timeline.'),
   limit: z.number().int().min(1).max(500).optional().describe('Max timeline events returned.'),
@@ -224,6 +230,8 @@ export const circuitVerifySequenceInputShape = {
   durationMs: z.number().min(50).max(60000).optional(),
   stepMs: z.number().min(2).max(100).default(10),
   maxCycleMs: z.number().positive().optional(),
+  allowRepeatCycles: z.boolean().optional().describe('Accept repeating copies of expectedSequence (for continuous mode).'),
+  minCycles: z.number().int().min(1).max(20).optional().describe('Minimum repeating cycles required when allowRepeatCycles=true.'),
   eStopCheck: z
     .object({
       label: z.string().min(1),

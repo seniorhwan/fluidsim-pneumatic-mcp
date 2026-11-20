@@ -24,6 +24,7 @@ export function handleCircuitSimulate(
     stepMs?: number;
     includeSamples?: boolean;
     sampleIntervalMs?: number;
+    sampleLimit?: number;
     supplyPressureBar?: number;
     cursor?: string;
     limit?: number;
@@ -40,15 +41,37 @@ export function handleCircuitSimulate(
     supplyPressureBar: args.supplyPressureBar,
   });
 
+  const effectiveMaxBytes = Math.min(ctx.maxPayloadBytes, args.maxBytes ?? ctx.maxPayloadBytes);
+  const eventsBudget = sim.samples ? Math.max(2048, Math.floor(effectiveMaxBytes * 0.45)) : effectiveMaxBytes;
   const pagedEvents = paginateWithBudget(
     sim.events,
     {
       cursor: args.cursor,
       limit: args.limit ?? 100,
-      maxBytes: args.maxBytes,
+      maxBytes: eventsBudget,
     },
-    ctx.maxPayloadBytes,
+    eventsBudget,
   );
+
+  let samplesPayload:
+    | { samples: NonNullable<typeof sim.samples>; samplesTotal: number; samplesTruncated: boolean }
+    | undefined;
+  if (sim.samples) {
+    const samplesBudget = Math.max(2048, Math.floor(effectiveMaxBytes * 0.45));
+    const pagedSamples = paginateWithBudget(
+      sim.samples,
+      {
+        limit: args.sampleLimit ?? 100,
+        maxBytes: samplesBudget,
+      },
+      samplesBudget,
+    );
+    samplesPayload = {
+      samples: pagedSamples.items,
+      samplesTotal: sim.samples.length,
+      samplesTruncated: pagedSamples.page.nextCursor !== null,
+    };
+  }
 
   return {
     path: relativePath,
@@ -61,7 +84,7 @@ export function handleCircuitSimulate(
     finalState: sim.finalState,
     events: pagedEvents.items,
     eventsPage: pagedEvents.page,
-    ...(sim.samples ? { samples: sim.samples } : {}),
+    ...(samplesPayload ?? {}),
   };
 }
 
@@ -76,6 +99,8 @@ export function handleCircuitVerifySequence(
     durationMs: args.durationMs,
     stepMs: args.stepMs,
     maxCycleMs: args.maxCycleMs,
+    allowRepeatCycles: args.allowRepeatCycles,
+    minCycles: args.minCycles,
     eStopCheck: args.eStopCheck,
   });
 

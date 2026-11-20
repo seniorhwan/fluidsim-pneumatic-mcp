@@ -24,6 +24,12 @@ export function handleCircuitInspect(ctx: McpToolContext, args: { path: string }
     leftActuation?: string;
     rightActuation?: string;
   }> = [];
+  const detectedInputs: Array<{
+    id: string;
+    label: string;
+    type: string;
+    detent: boolean;
+  }> = [];
   let electricalLoadCount = 0;
 
   for (const c of document.components) {
@@ -51,6 +57,27 @@ export function handleCircuitInspect(ctx: McpToolContext, args: { path: string }
           ? `${c.rightActuation.type}${c.rightActuation.label ? `(${c.rightActuation.label})` : ''}`
           : undefined,
       });
+      if (
+        c.leftActuation?.type === 'pushbutton' ||
+        c.leftActuation?.type === 'detent' ||
+        c.rightActuation?.type === 'pushbutton' ||
+        c.rightActuation?.type === 'detent'
+      ) {
+        const isDetent = c.leftActuation?.type === 'detent' || c.rightActuation?.type === 'detent';
+        detectedInputs.push({
+          id: c.id,
+          label: c.label ?? c.leftActuation?.label ?? c.rightActuation?.label ?? c.id,
+          type: c.type,
+          detent: isDetent,
+        });
+      }
+    } else if (c.type === 'pushbutton_no' || c.type === 'pushbutton_nc') {
+      detectedInputs.push({
+        id: c.id,
+        label: c.label ?? c.id,
+        type: c.type,
+        detent: c.params.detent === true,
+      });
     } else if (
       c.type === 'relay_coil' ||
       c.type === 'timer_relay_on_delay' ||
@@ -72,6 +99,7 @@ export function handleCircuitInspect(ctx: McpToolContext, args: { path: string }
     countsByCategory,
     actuators,
     valves,
+    detectedInputs,
     electricalRungCount: electricalLoadCount,
     validationSummary: {
       valid: validation.valid,
@@ -87,7 +115,7 @@ export function handleCircuitExportNetlist(
 ) {
   const { document, relativePath } = loadCircuitFromWorkspace(ctx, args.path);
   const format = args.format ?? 'compact-text';
-  const budget = args.maxBytes ?? ctx.maxPayloadBytes;
+  const budget = Math.min(ctx.maxPayloadBytes, args.maxBytes ?? ctx.maxPayloadBytes);
 
   if (format === 'compact-text') {
     const lines: string[] = [];

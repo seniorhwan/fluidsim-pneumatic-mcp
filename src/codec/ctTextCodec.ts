@@ -7,6 +7,7 @@ import type {
   ValveActuationSide,
 } from '../contracts/circuit';
 import type { DecodedCtContainer } from './ctBinaryCodec';
+import { getPortDefinition } from '../catalog/pneumatics45';
 
 /**
  * Lossless FluidSIM 4.5 `.ct` text AST parser & serializer + Semantic IR bridge.
@@ -431,7 +432,7 @@ export function computeSemanticFingerprint(doc: Pick<CircuitDocument, 'metadata'
 }
 
 const PORT_CLASSES = new Set(['PConnection', 'EConnection', 'UEConnection', 'UMConnection']);
-const DECORATIVE_CLASSES = new Set(['CAD_RECT', 'text', 'CheckValveP', 'hupe']);
+const DECORATIVE_CLASSES = new Set(['CAD_RECT', 'text', 'hupe']);
 
 export function parseCtContainerToDocument(
   container: DecodedCtContainer,
@@ -580,7 +581,7 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'PPE1' || obj.cls === 'CompressorFixedP') {
+    } else if (obj.cls === 'PPE1') {
       const pressureBar = getNumberProp(obj.props, 'P_LIM', 6.0);
       const maxFlowLMin = getNumberProp(obj.props, 'FLOW', 1000);
       node = {
@@ -590,8 +591,11 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'PPE2') {
-      const nominalPressureBar = getNumberProp(obj.props, 'P_SOLL', 6.0);
+    } else if (obj.cls === 'PPE2' || obj.cls === 'CompressorFixedP') {
+      const nominalPressureBar =
+        obj.cls === 'CompressorFixedP'
+          ? getNumberProp(obj.props, 'P_LIM', 6.0)
+          : getNumberProp(obj.props, 'P_SOLL', 6.0);
       node = {
         id,
         type: 'air_service_unit',
@@ -683,8 +687,8 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'DV_P1') {
-      const level = getNumberProp(obj.props, 'LEVEL', 50);
+    } else if (obj.cls === 'DV_P1' || obj.cls === 'CheckValveP') {
+      const level = obj.cls === 'CheckValveP' ? 100 : getNumberProp(obj.props, 'LEVEL', 50);
       const openingPct = Math.max(1, Math.min(100, level > 0 ? level : 50));
       const freeFlowDirection = getScalarProp(obj.props, '_MCP_FREE_FLOW') === '2_to_1' ? '2_to_1' : '1_to_2';
       node = {
@@ -752,12 +756,13 @@ export function parseCtContainerToDocument(
       };
     } else if (obj.cls === 'E_K008') {
       const lbl = getScalarProp(obj.props, 'label');
-      const delaySec = getNumberProp(obj.props, 'DELAY_TIME', 1);
+      // FluidSIM 4.5 stores E_K008 DELAY_TIME in tenths of a second (e.g. 50 = 5.0 s = 5000 ms).
+      const delayTenths = getNumberProp(obj.props, 'DELAY_TIME', 10);
       node = {
         id,
         type: 'timer_relay_on_delay',
         ...(lbl ? { label: lbl } : {}),
-        params: { delayMs: Math.max(10, Math.round(delaySec * 1000)) },
+        params: { delayMs: Math.max(10, Math.round(delayTenths * 100)) },
         layout,
         rawMetadata,
       };
@@ -854,8 +859,24 @@ export function parseCtContainerToDocument(
     const typeB = compTypeByObjIdx.get(pB.parentId);
     if (!compIdA || !compIdB || !typeA || !typeB) continue;
 
-    const portA = gateNumberToPortName(typeA, pA.gateNum);
-    const portB = gateNumberToPortName(typeB, pB.gateNum);
+    const clsA = objByIdx.get(pA.parentId)?.cls;
+    const clsB = objByIdx.get(pB.parentId)?.cls;
+    const portA =
+      clsA === 'CompressorFixedP'
+        ? pA.gateNum === 1
+          ? '2'
+          : pA.gateNum === 2
+            ? '1'
+            : undefined
+        : gateNumberToPortName(typeA, pA.gateNum);
+    const portB =
+      clsB === 'CompressorFixedP'
+        ? pB.gateNum === 1
+          ? '2'
+          : pB.gateNum === 2
+            ? '1'
+            : undefined
+        : gateNumberToPortName(typeB, pB.gateNum);
     if (!portA || !portB) continue;
 
     const portObjA = objByIdx.get(con.portObjA);
@@ -1082,8 +1103,15 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       extraProps: string[] = [],
     ): number => {
       const pid = allocObjId();
+      const portDef = portName ? getPortDefinition(comp.type, portName) : undefined;
+      const offX = portDef ? Math.round(portDef.offset.x * FS_UNIT_PER_MM) : gateNum * 3072;
+      const offY = portDef ? Math.round(portDef.offset.y * FS_UNIT_PER_MM) : 0;
+      const px1 = x1 + offX - 2048;
+      const py1 = y1 + offY - 2048;
+      const px2 = x1 + offX + 2048;
+      const py2 = y1 + offY + 2048;
       const lines = [
-        `${cls} O${pid} ${x1} ${y1} ${x1 + 10240} ${y1 + 10240} 0 0 348163`,
+        `${cls} O${pid} ${px1} ${py1} ${px2} ${py2} 0 0 348163`,
         ...extraProps,
       ];
       objectBlocks.push(lines.join('\n'));
@@ -1443,13 +1471,13 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         break;
       }
       case 'timer_relay_on_delay': {
-        const delaySec = Number(comp.params.delayMs ?? 1000) / 1000;
+        const delayTenths = Math.max(0.1, Math.round((Number(comp.params.delayMs ?? 1000) / 100) * 10) / 10);
         objectBlocks.push(
           [
             `E_K008 O${parentId} ${x1} ${y1} ${x1 + 36864} ${y1 + 30720} ${rot} ${flip} 1105928`,
             idProp,
             ' S DELAY_TIME_FEST B T',
-            ` S DELAY_TIME F ${delaySec}`,
+            ` S DELAY_TIME F ${delayTenths}`,
             ...labelProp,
           ].join('\n'),
         );
@@ -1564,14 +1592,25 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     }
   }
 
-  // Emit CON PLine / CON ELine edges
+  // Emit CON PLine / CON ELine edges (with orthogonal L polyline segments when routed)
   for (const edge of document.connections) {
     if (embeddedExhaustEdgeIds.has(edge.id)) continue;
     const pA = portObjIdMap.get(`${edge.from.componentId}:${edge.from.port}`);
     const pB = portObjIdMap.get(`${edge.to.componentId}:${edge.to.port}`);
     if (pA === undefined || pB === undefined) continue;
     const conKind = edge.domain === 'pneumatic' ? 'PLine' : 'ELine';
-    connectionBlocks.push(`CON ${conKind} ${pA} ${pB}\n S _MCP_EDGE_ID S ${edge.id}`);
+    const conLines = [`CON ${conKind} ${pA} ${pB}`];
+    if (edge.waypoints && edge.waypoints.length >= 2) {
+      for (let w = 0; w < edge.waypoints.length - 1; w++) {
+        const a = edge.waypoints[w];
+        const b = edge.waypoints[w + 1];
+        conLines.push(
+          `L ${Math.round(a.x * FS_UNIT_PER_MM)} ${Math.round(a.y * FS_UNIT_PER_MM)} ${Math.round(b.x * FS_UNIT_PER_MM)} ${Math.round(b.y * FS_UNIT_PER_MM)}`,
+        );
+      }
+    }
+    conLines.push(` S _MCP_EDGE_ID S ${edge.id}`);
+    connectionBlocks.push(conLines.join('\n'));
   }
 
   const ctBody = [...objectBlocks, '0 0 0 # 0 0 0 0 0 0', ...gateLines, ...connectionBlocks].join('\n');

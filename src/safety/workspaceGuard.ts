@@ -72,20 +72,34 @@ export class WorkspaceGuard {
       });
     }
 
-    // Check symlink escape if parent exists
+    // Check symlink escape on parent directory AND on the target file itself (if it exists)
     const parentDir = path.dirname(candidate);
-    if (fs.existsSync(parentDir) && fs.existsSync(this.root)) {
+    if (fs.existsSync(this.root)) {
       const realRoot = fs.realpathSync(this.root);
-      const realParent = fs.realpathSync(parentDir);
       const realRootPrefix = realRoot.endsWith(path.sep) ? realRoot : `${realRoot}${path.sep}`;
-      if (realParent !== realRoot && !realParent.startsWith(realRootPrefix)) {
-        throw new EngineeringError({
-          category: 'AccessDenied',
-          code: 'SYMLINK_ESCAPE_BLOCKED',
-          message: `Path "${relativeOrAbsPath}" traverses a symlink outside the workspace jail.`,
-          offendingIds: [relativeOrAbsPath],
-          suggestedFix: 'Place circuit files directly inside the workspace without external symlinks.',
-        });
+      if (fs.existsSync(parentDir)) {
+        const realParent = fs.realpathSync(parentDir);
+        if (realParent !== realRoot && !realParent.startsWith(realRootPrefix)) {
+          throw new EngineeringError({
+            category: 'AccessDenied',
+            code: 'SYMLINK_ESCAPE_BLOCKED',
+            message: `Path "${relativeOrAbsPath}" traverses a symlink outside the workspace jail.`,
+            offendingIds: [relativeOrAbsPath],
+            suggestedFix: 'Place circuit files directly inside the workspace without external symlinks.',
+          });
+        }
+      }
+      if (fs.existsSync(candidate)) {
+        const realCandidate = fs.realpathSync(candidate);
+        if (realCandidate !== realRoot && !realCandidate.startsWith(realRootPrefix)) {
+          throw new EngineeringError({
+            category: 'AccessDenied',
+            code: 'SYMLINK_ESCAPE_BLOCKED',
+            message: `Target "${relativeOrAbsPath}" is a symlink pointing outside the workspace jail.`,
+            offendingIds: [relativeOrAbsPath],
+            suggestedFix: 'Use regular files inside the workspace rather than symlinks pointing outside.',
+          });
+        }
       }
     }
 

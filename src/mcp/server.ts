@@ -88,10 +88,10 @@ export function createFluidsimMcpServer(options: CreateServerOptions): {
       const data = fn(context, args);
       const envelope = okResult(data);
       const budget = Math.min(context.maxPayloadBytes, policy.defaultMaxPayloadBytes);
-      // Allow explicit per-call maxBytes override when caller raises it intentionally
+      // Callers may tighten maxBytes per call, but never exceed the server-configured hard ceiling
       const requestedBudget =
         typeof (args as { maxBytes?: unknown })?.maxBytes === 'number'
-          ? (args as { maxBytes: number }).maxBytes
+          ? Math.min(context.maxPayloadBytes, Math.max(512, (args as { maxBytes: number }).maxBytes))
           : budget;
       assertPayloadBudget(envelope, requestedBudget, toolName);
       return {

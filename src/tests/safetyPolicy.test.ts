@@ -8,6 +8,8 @@ import { enforceToolPolicy } from '../safety/policyCatalog';
 import { parseAccessMode } from '../safety/accessMode';
 import { EngineeringError } from '../contracts/errors';
 import { assertPayloadBudget, paginateWithBudget } from '../contracts/pagination';
+import { saveCircuitWithPostcondition } from '../mcp/tools/context';
+import { generateCircuitFromSpec } from '../authoring/specGenerator';
 
 test('WorkspaceGuard blocks path traversal, absolute escapes, and disallowed extensions', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fsim-guard-'));
@@ -105,4 +107,70 @@ test('Cursor pagination respects limit and byte budget and raises PayloadBudgetE
       err.category === 'PayloadBudgetExceeded' &&
       err.code === 'PAYLOAD_BUDGET_EXCEEDED',
   );
+});
+
+test('WorkspaceGuard blocks direct symlink file pointing outside workspace jail', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fsim-sym-ws-'));
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fsim-sym-out-'));
+  try {
+    const outsideFile = path.join(outsideDir, 'secret.ct');
+    fs.writeFileSync(outsideFile, 'OUTSIDE_DATA');
+    const linkInside = path.join(tmpRoot, 'escape.ct');
+    fs.symlinkSync(outsideFile, linkInside);
+
+    const guard = new WorkspaceGuard({ workspaceRoot: tmpRoot });
+    assert.throws(
+      () => guard.resolveCircuitPath('escape.ct'),
+      (err: unknown) =>
+        err instanceof EngineeringError &&
+        err.category === 'AccessDenied' &&
+        err.code === 'SYMLINK_ESCAPE_BLOCKED',
+    );
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test('saveCircuitWithPostcondition rolls back to prior bytes if postcondition verification fails', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fsim-rollback-'));
+  try {
+    const baseGuard = new WorkspaceGuard({ workspaceRoot: tmpDir });
+    const originalContent = JSON.stringify({ sentinel: 'ORIGINAL_SAFE_BYTES' });
+    baseGuard.writeFileAtomic('target.fsim.json', originalContent);
+
+    // Subclass guard whose readFileBuffer injects corrupted JSON during postcondition check
+    class FailingPostconditionGuard extends WorkspaceGuard {
+      override readFileBuffer(): Buffer {
+        return Buffer.from('{CORRUPT_JSON', 'utf8');
+      }
+    }
+
+    const faultyGuard = new FailingPostconditionGuard({ workspaceRoot: tmpDir });
+    const doc = generateCircuitFromSpec({
+      actuators: [{ label: 'A' }],
+      sequence: ['A+', 'A-'],
+      controlMethod: 'electro-pneumatic-step-chain',
+    });
+
+    assert.throws(() =>
+      saveCircuitWithPostcondition(
+        {
+          guard: faultyGuard,
+          accessMode: 'authoring',
+          maxPayloadBytes: 65536,
+          serverVersion: '1.0.0',
+          repoRoot: process.cwd(),
+        },
+        'target.fsim.json',
+        doc,
+      ),
+    );
+
+    // Original file bytes on disk MUST be restored intact
+    const afterDisk = fs.readFileSync(path.join(tmpDir, 'target.fsim.json'), 'utf8');
+    assert.equal(afterDisk, originalContent);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

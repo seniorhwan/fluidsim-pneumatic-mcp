@@ -17,6 +17,7 @@ import { EngineeringError } from '../contracts/errors';
 import { generateCircuitFromSpec } from '../authoring/specGenerator';
 import { applyCircuitPatch } from '../authoring/patchEngine';
 import { validateCircuitStatic } from '../simulator/validator';
+import { simulateCircuit } from '../simulator/simulator';
 import { verifyCircuitSequence } from '../simulator/sequenceVerifier';
 import { diffCtBuffers, inspectCtBuffer } from '../../scripts/inspect-ct';
 
@@ -213,4 +214,133 @@ test('scripts/inspect-ct decodes real FluidSIM .ct files and computes pairwise d
 
   const diff = diffCtBuffers(goldenPneu, goldenElectro, 'pneu.ct', 'electro.ct');
   assert.ok(diff.addedLines.some((l) => l.text.includes('E_K001')));
+});
+
+test('all 6 real golden FluidSIM 4.5 .ct fixtures pass static validation with 0 errors and 0 warnings', () => {
+  for (const name of REQUIRED_GOLDEN_FIXTURES) {
+    const filePath = path.resolve(process.cwd(), 'fixtures', 'golden', name);
+    const bytes = fs.readFileSync(filePath);
+    const { document } = parseCircuitBuffer(bytes, name);
+    const val = validateCircuitStatic(document);
+    assert.equal(
+      val.valid,
+      true,
+      `Golden fixture ${name} failed validation: ${JSON.stringify(val.findings)}`,
+    );
+    assert.equal(val.errorCount, 0, `Golden fixture ${name} had errors: ${JSON.stringify(val.findings)}`);
+    assert.equal(val.warningCount, 0, `Golden fixture ${name} had warnings: ${JSON.stringify(val.findings)}`);
+  }
+});
+
+test('real golden FluidSIM 4.5 .ct fixtures simulate accurately (direct/indirect, cascade, electro ABBA, timers, 5-count counter, latch)', () => {
+  const loadGolden = (name: string) =>
+    parseCircuitBuffer(fs.readFileSync(path.resolve(process.cwd(), 'fixtures', 'golden', name)), name).document;
+
+  // 01: direct series enable (O18 detent + O3 pushbutton -> O28+/O28-) + indirect valves (O84 -> O94+, O104 -> O126+)
+  const doc01 = loadGolden('01_direct_indirect_cylinders.ct');
+  const sim01 = simulateCircuit(doc01, {
+    durationMs: 2500,
+    stepMs: 10,
+    inputs: [
+      { label: 'O18', action: 'toggle', atMs: 50 },
+      { label: 'O3', action: 'press', atMs: 100, durationMs: 600 },
+      { label: 'O84', action: 'press', atMs: 200, durationMs: 500 },
+      { label: 'O104', action: 'press', atMs: 200, durationMs: 500 },
+    ],
+  });
+  assert.ok(sim01.observedSequence.includes('O28+'));
+  assert.ok(sim01.observedSequence.includes('O28-'));
+  assert.ok(sim01.observedSequence.includes('O94+'));
+  assert.ok(sim01.observedSequence.includes('O126+'));
+
+  // 03: pure pneumatic A+ B+ B- A- sequence (O83 detent starts O21, O38 cycle)
+  const doc03 = loadGolden('03_pneumatic_abba_sequence.ct');
+  const sim03 = simulateCircuit(doc03, {
+    durationMs: 4000,
+    stepMs: 10,
+    inputs: [{ label: 'O83', action: 'toggle', atMs: 100 }],
+  });
+  assert.deepEqual(sim03.observedSequence.slice(0, 4), ['O21+', 'O38+', 'O38-', 'O21-']);
+  assert.equal(sim03.diagnostics.length, 0);
+
+  // 04: electro-pneumatic A+ B+ B- A- sequence (START -> O20+ O107+ O107- O20-)
+  const doc04 = loadGolden('04_electro_pneumatic_abba.ct');
+  const sim04 = simulateCircuit(doc04, {
+    durationMs: 4000,
+    stepMs: 10,
+    inputs: [{ label: 'START', action: 'press', atMs: 100, durationMs: 150 }],
+  });
+  assert.deepEqual(sim04.observedSequence.slice(0, 4), ['O20+', 'O107+', 'O107-', 'O20-']);
+  assert.equal(sim04.diagnostics.length, 0);
+
+  // 05: 5s timers (START_1 -> O20+ O20-) AND 5-count preset counter (START_2 -> exact 5 cycles of O216+ O216-)
+  const doc05 = loadGolden('05_timer_counter_electro.ct');
+  const sim05Timer = simulateCircuit(doc05, {
+    durationMs: 15000,
+    stepMs: 20,
+    inputs: [{ label: 'START_1', action: 'press', atMs: 100, durationMs: 200 }],
+  });
+  assert.deepEqual(sim05Timer.observedSequence.slice(0, 2), ['O20+', 'O20-']);
+  assert.equal(sim05Timer.diagnostics.length, 0);
+
+  const sim05Counter = simulateCircuit(doc05, {
+    durationMs: 12000,
+    stepMs: 10,
+    inputs: [{ label: 'START_2', action: 'press', atMs: 100, durationMs: 150 }],
+  });
+  const countExtends = sim05Counter.observedSequence.filter((s) => s === 'O216+').length;
+  const countRetracts = sim05Counter.observedSequence.filter((s) => s === 'O216-').length;
+  assert.equal(countExtends, 5, `Expected exactly 5 counter cycles, got ${countExtends}`);
+  assert.equal(countRetracts, 5, `Expected exactly 5 counter retractions, got ${countRetracts}`);
+  assert.equal(sim05Counter.diagnostics.length, 0);
+
+  // 06: electrical latch (O0 latches relay K and energizes lamp O24)
+  const doc06 = loadGolden('06_electrical_latch_legacy.ct');
+  const sim06 = simulateCircuit(doc06, {
+    durationMs: 1000,
+    stepMs: 10,
+    inputs: [{ label: 'O0', action: 'press', atMs: 100, durationMs: 150 }],
+  });
+  const latchRelay = Object.values(sim06.finalState.relays).find((r) => r.label === 'K');
+  assert.ok(latchRelay && latchRelay.energized === true, 'Expected relay K to remain latched');
+  assert.equal(sim06.finalState.lamps.O24?.lit, true, 'Expected indicator lamp O24 to remain lit');
+});
+
+test('generated native .ct files emit distinct catalog-offset port coordinates and orthogonal L polyline segments', () => {
+  const doc = generateCircuitFromSpec({
+    title: 'Geometry Fidelity CT',
+    actuators: [{ label: 'A', strokeMm: 100 }],
+    sequence: ['A+', 'A-'],
+    controlMethod: 'electro-pneumatic-step-chain',
+  });
+
+  const ctBytes = serializeCircuitDocument(doc, { targetPath: 'geom.ct' });
+  const decoded = decodeCtContainer(ctBytes, 'geom.ct');
+  const lines = decoded.ctBody.split('\n');
+
+  // Verify at least one WV_5 component has child PConnection objects at distinct coordinates (not stacked)
+  const wv5Idx = lines.findIndex((l) => l.startsWith('WV_5 '));
+  assert.ok(wv5Idx >= 0, 'Expected WV_5 block in generated native .ct');
+  const pConnCoords = new Set<string>();
+  for (let i = wv5Idx + 1; i < lines.length; i++) {
+    const ln = lines[i].trim();
+    if (ln === 'END') break;
+    if (ln.startsWith('PConnection ')) {
+      const parts = ln.split(/\s+/);
+      // PConnection <id> <x1> <y1> <x2> <y2>
+      pConnCoords.add(`${parts[2]},${parts[3]}`);
+    }
+  }
+  assert.ok(
+    pConnCoords.size >= 5,
+    `Expected 5 distinct PConnection coordinates on WV_5, got ${pConnCoords.size}`,
+  );
+
+  // Verify CON PLine / CON ELine blocks emit orthogonal L <x1> <y1> <x2> <y2> geometry segments
+  const lSegments = lines.filter((l) => /^\s*L\s+-?\d+\s+-?\d+\s+-?\d+\s+-?\d+/.test(l));
+  assert.ok(lSegments.length > 0, 'Expected orthogonal L polyline segments in generated native .ct');
+  for (const seg of lSegments) {
+    const [, x1s, y1s, x2s, y2s] = seg.trim().split(/\s+/);
+    assert.ok(x1s === x2s || y1s === y2s, `Non-orthogonal native .ct wire segment: ${seg}`);
+  }
 });

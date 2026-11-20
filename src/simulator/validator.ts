@@ -90,6 +90,7 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
 
   // 2. Validate connections & domain compatibility
   const edgeIds = new Set<string>();
+  const seenPortPairs = new Map<string, string>();
   const validEdges: ConnectionEdge[] = [];
 
   for (const edge of doc.connections) {
@@ -158,9 +159,24 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
       continue;
     }
 
-    validEdges.push(edge);
     const fk = portKey(fromComp.id, fromPort.name);
     const tk = portKey(toComp.id, toPort.name);
+    const pairKey = fk < tk ? `${fk}<->${tk}` : `${tk}<->${fk}`;
+    const prevEdgeId = seenPortPairs.get(pairKey);
+    if (prevEdgeId) {
+      findings.push({
+        severity: 'warning',
+        category: 'InvalidTopology',
+        code: 'DUPLICATE_CONNECTION',
+        message: `Edge "${edge.id}" duplicates existing connection "${prevEdgeId}" between ${fromComp.id}.${fromPort.name} and ${toComp.id}.${toPort.name}.`,
+        offendingIds: [edge.id, prevEdgeId],
+        suggestedFix: `Disconnect duplicate edge "${edge.id}".`,
+      });
+    } else {
+      seenPortPairs.set(pairKey, edge.id);
+    }
+
+    validEdges.push(edge);
     connectedPorts.add(fk);
     connectedPorts.add(tk);
     addPortEdge(fk, tk);
@@ -245,6 +261,84 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
           suggestedFix: `Connect a pilot signal line to ${comp.id}.${rightPilotPort} or change rightActuation.`,
         });
       }
+      if (
+        (!comp.leftActuation || comp.leftActuation.type === 'none') &&
+        (!comp.rightActuation || comp.rightActuation.type === 'none')
+      ) {
+        findings.push({
+          severity: 'error',
+          category: 'PneumaticRuleViolation',
+          code: 'UNACTUATED_VALVE',
+          message: `Directional valve ${comp.id} (${comp.type}) has neither leftActuation nor rightActuation configured and can never switch.`,
+          offendingIds: [comp.id],
+          suggestedFix: `Configure leftActuation (e.g. solenoid, pneumatic_pilot, pushbutton, roller) and rightActuation (e.g. spring or pilot) on ${comp.id}.`,
+        });
+      }
+    }
+
+    if (comp.type === 'pneumatic_junction') {
+      const wiredCount = ['1', '2', '3', '4'].filter((pn) => connectedPorts.has(portKey(comp.id, pn))).length;
+      if (wiredCount < 2) {
+        findings.push({
+          severity: 'warning',
+          category: 'PneumaticRuleViolation',
+          code: 'DANGLING_JUNCTION',
+          message: `Pneumatic junction ${comp.id} has only ${wiredCount} connected port(s).`,
+          offendingIds: [comp.id],
+          suggestedFix: `Connect at least 2 pneumatic lines to ${comp.id} or remove the unused junction.`,
+        });
+      }
+    }
+  }
+
+  // 4b. Check for double-acting cylinder chamber A directly shorted to chamber B on same hose/junction net
+  const pneuDirectGraph = new Map<string, Set<string>>();
+  const linkDirect = (a: string, b: string): void => {
+    if (!pneuDirectGraph.has(a)) pneuDirectGraph.set(a, new Set());
+    if (!pneuDirectGraph.has(b)) pneuDirectGraph.set(b, new Set());
+    pneuDirectGraph.get(a)!.add(b);
+    pneuDirectGraph.get(b)!.add(a);
+  };
+  for (const e of validEdges) {
+    if (e.domain !== 'pneumatic') continue;
+    linkDirect(portKey(e.from.componentId, e.from.port), portKey(e.to.componentId, e.to.port));
+  }
+  for (const c of pneumaticComps) {
+    if (c.type === 'pneumatic_junction') {
+      linkDirect(portKey(c.id, '1'), portKey(c.id, '2'));
+      linkDirect(portKey(c.id, '1'), portKey(c.id, '3'));
+      linkDirect(portKey(c.id, '1'), portKey(c.id, '4'));
+    }
+  }
+  for (const c of pneumaticComps) {
+    if (c.type !== 'cylinder_double_acting') continue;
+    const start = portKey(c.id, 'A');
+    const target = portKey(c.id, 'B');
+    const seen = new Set<string>([start]);
+    const q = [start];
+    let shorted = false;
+    while (q.length > 0) {
+      const u = q.shift()!;
+      if (u === target) {
+        shorted = true;
+        break;
+      }
+      for (const v of pneuDirectGraph.get(u) ?? []) {
+        if (!seen.has(v)) {
+          seen.add(v);
+          q.push(v);
+        }
+      }
+    }
+    if (shorted) {
+      findings.push({
+        severity: 'error',
+        category: 'PneumaticRuleViolation',
+        code: 'PNEUMATIC_CHAMBER_SHORT',
+        message: `Double-acting cylinder ${c.id} has chambers A and B shorted together on the same pneumatic line.`,
+        offendingIds: [c.id],
+        suggestedFix: `Connect ${c.id}.A to directional valve port 4 and ${c.id}.B to port 2 separately.`,
+      });
     }
   }
 
@@ -708,6 +802,54 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
             message: `Electrical load "${c.id}" (${c.label ?? c.type}) cannot be energized from +24V rail through terminal ${pIn}.`,
             offendingIds: [c.id],
             suggestedFix: `Wire ${c.id}.${pIn} through switches/contacts back to power_24v.OUT.`,
+          });
+        }
+      }
+    }
+
+    // Warn on floating/unconnected switch/contact ports or dangling electrical junctions
+    for (const c of electricalComps) {
+      if (c.type === 'electrical_junction') {
+        const wiredCount = ['1', '2', '3', '4'].filter((pn) => connectedPorts.has(portKey(c.id, pn))).length;
+        if (wiredCount < 2) {
+          findings.push({
+            severity: 'warning',
+            category: 'ElectricalRuleViolation',
+            code: 'DANGLING_JUNCTION',
+            message: `Electrical junction ${c.id} has only ${wiredCount} connected port(s).`,
+            offendingIds: [c.id],
+            suggestedFix: `Connect at least 2 wires to ${c.id} or remove the unused junction.`,
+          });
+        }
+      } else if (
+        c.type === 'pushbutton_no' ||
+        c.type === 'limit_switch_no' ||
+        c.type === 'proximity_switch_magnetic' ||
+        c.type === 'relay_contact_no'
+      ) {
+        if (!connectedPorts.has(portKey(c.id, '13')) || !connectedPorts.has(portKey(c.id, '14'))) {
+          findings.push({
+            severity: 'warning',
+            category: 'ElectricalRuleViolation',
+            code: 'OPEN_ELECTRICAL_PORT',
+            message: `Electrical switch/contact "${c.id}" (${c.label ?? c.type}) has an unconnected terminal (13 or 14).`,
+            offendingIds: [c.id],
+            suggestedFix: `Wire both terminals 13 and 14 of "${c.id}" into a ladder rung or remove it.`,
+          });
+        }
+      } else if (
+        c.type === 'pushbutton_nc' ||
+        c.type === 'limit_switch_nc' ||
+        c.type === 'relay_contact_nc'
+      ) {
+        if (!connectedPorts.has(portKey(c.id, '11')) || !connectedPorts.has(portKey(c.id, '12'))) {
+          findings.push({
+            severity: 'warning',
+            category: 'ElectricalRuleViolation',
+            code: 'OPEN_ELECTRICAL_PORT',
+            message: `Electrical NC switch/contact "${c.id}" (${c.label ?? c.type}) has an unconnected terminal (11 or 12).`,
+            offendingIds: [c.id],
+            suggestedFix: `Wire both terminals 11 and 12 of "${c.id}" into a ladder rung or remove it.`,
           });
         }
       }

@@ -10,6 +10,7 @@ import {
   type CircuitSpecRequest,
 } from '../../authoring/specGenerator';
 import { verifyCircuitSequence } from '../../simulator/sequenceVerifier';
+import { validateCircuitStatic } from '../../simulator/validator';
 
 function buildTemplateDocument(
   template: 'blank' | 'pneumatic_basic' | 'electro_pneumatic_24v',
@@ -121,16 +122,34 @@ export function handleCircuitCreate(
 
 export function handleCircuitApplyPatch(
   ctx: McpToolContext,
-  args: { path: string; operations: CircuitPatchOp[]; backup?: boolean },
+  args: { path: string; operations: CircuitPatchOp[]; backup?: boolean; dryRun?: boolean },
 ) {
   const { document, relativePath } = loadCircuitFromWorkspace(ctx, args.path);
   const patched = applyCircuitPatch(document, args.operations);
+
+  if (args.dryRun) {
+    const validation = validateCircuitStatic(patched.document);
+    return {
+      path: relativePath,
+      dryRun: true,
+      appliedOperations: patched.appliedCount,
+      addedComponents: patched.addedComponents,
+      updatedComponents: patched.updatedComponents,
+      removedComponents: patched.removedComponents,
+      addedConnections: patched.addedConnections,
+      removedConnections: patched.removedConnections,
+      postconditionPassed: validation.valid,
+      validation,
+    };
+  }
+
   const saved = saveCircuitWithPostcondition(ctx, relativePath, patched.document, {
     backup: args.backup,
   });
 
   return {
     path: saved.relativePath,
+    dryRun: false,
     appliedOperations: patched.appliedCount,
     addedComponents: patched.addedComponents,
     updatedComponents: patched.updatedComponents,
@@ -160,12 +179,14 @@ export function handleCircuitGenerateFromSpec(
 
   let sequenceVerification = undefined;
   if (shouldVerify) {
-    const startAction = args.startMode === 'continuous' ? ('press' as const) : ('press' as const);
+    const isContinuous = args.startMode === 'continuous';
+    const perCycleMs = Math.max(2500, args.sequence.length * 1400);
     sequenceVerification = verifyCircuitSequence(saved.postcondition.reparsedDocument, {
       expectedSequence: args.sequence,
-      inputs: [{ label: 'S1', action: startAction, atMs: 100, durationMs: 150 }],
-      durationMs: Math.max(4000, args.sequence.length * 1400),
+      inputs: [{ label: 'S1', action: 'press', atMs: 100, durationMs: 150 }],
+      durationMs: Math.min(60_000, isContinuous ? perCycleMs * 2 + 1500 : Math.max(4000, perCycleMs)),
       stepMs: 10,
+      ...(isContinuous ? { allowRepeatCycles: true, minCycles: 2 } : {}),
       ...(args.includeEStop && args.sequence.length >= 2
         ? {
             eStopCheck: {

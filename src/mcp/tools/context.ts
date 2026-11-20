@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import type { CircuitDocument } from '../../contracts/circuit';
 import type { AccessMode } from '../../safety/accessMode';
 import type { WorkspaceGuard } from '../../safety/workspaceGuard';
@@ -35,12 +36,30 @@ export function saveCircuitWithPostcondition(
 ): { relativePath: string; backupPath?: string; postcondition: PostconditionResult } {
   const abs = ctx.guard.resolveCircuitPath(filePath);
   const relativePath = ctx.guard.toRelativePath(abs);
+  const existedBefore = fs.existsSync(abs);
+  const previousBytes = existedBefore ? fs.readFileSync(abs) : null;
+
   const bytes = serializeCircuitDocument(document, { targetPath: relativePath });
   const written = ctx.guard.writeFileAtomic(relativePath, bytes, options);
-  const postcondition = verifyWrittenCircuitPostcondition(ctx.guard, relativePath, document);
-  return {
-    relativePath: written.relativePath,
-    ...(written.backupPath ? { backupPath: written.backupPath } : {}),
-    postcondition,
-  };
+
+  try {
+    const postcondition = verifyWrittenCircuitPostcondition(ctx.guard, relativePath, document);
+    return {
+      relativePath: written.relativePath,
+      ...(written.backupPath ? { backupPath: written.backupPath } : {}),
+      postcondition,
+    };
+  } catch (err) {
+    // Transactional rollback: restore prior file bytes (or remove newly created file) on postcondition failure
+    try {
+      if (existedBefore && previousBytes !== null) {
+        ctx.guard.writeFileAtomic(relativePath, previousBytes, { backup: false });
+      } else if (!existedBefore && fs.existsSync(abs)) {
+        fs.unlinkSync(abs);
+      }
+    } catch {
+      // Best-effort rollback; preserve original postcondition error
+    }
+    throw err;
+  }
 }
