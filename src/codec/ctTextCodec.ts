@@ -7,14 +7,33 @@ import type {
   ValveActuationSide,
 } from '../contracts/circuit';
 import type { DecodedCtContainer } from './ctBinaryCodec';
-import { getPortDefinition } from '../catalog/pneumatics45';
+import { getCatalogComponent, getPortDefinition } from '../catalog/pneumatics45';
+import { autoLayoutCircuit, rotatePortOffset } from '../authoring/layoutRouter';
+import {
+  CtSymbolAllocator,
+  buildCheckValveSyms,
+  buildCylinderSyms,
+  buildDualPressureAndSym,
+  buildFilterSym,
+  buildFlowControlOneWaySym,
+  buildPressureRegulatorSym,
+  buildPressureSwitchSym,
+  buildQuickExhaustSym,
+  buildShuttleValveOrSym,
+  buildSwivelDriveSym,
+  buildThrottleValveSym,
+  buildVacuumNozzleSym,
+  buildVacuumSuckerSym,
+  buildValveSym,
+  buildWartungseinheit2Sym,
+} from './ctSymbolLibrary';
 
 /**
  * Lossless FluidSIM 4.5 `.ct` text AST parser & serializer + Semantic IR bridge.
  * Empirically verified against real Festo FluidSIM `.ct` files in `fixtures/golden/`.
  */
 
-const FS_UNIT_PER_MM = 1024;
+const FS_UNIT_PER_MM = 3072;
 
 export interface RawCtObject {
   cls: string;
@@ -589,6 +608,11 @@ export function parseCtContainerToDocument(
     if (PORT_CLASSES.has(obj.cls) || obj.cls === 'R_SCHALT') continue;
 
     if (obj.cls === 'text') {
+      // Auto-generated component tag text labels are regenerated cleanly on serialize
+      // and must NOT hijack the sheet title or duplicate across patches.
+      if (getScalarProp(obj.props, '_MCP_LABEL_FOR')) {
+        continue;
+      }
       const txt = getScalarProp(obj.props, 'text');
       if (!detectedTitle && txt && txt.trim().length > 0) {
         detectedTitle = txt.trim();
@@ -707,15 +731,23 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'PPE2' || obj.cls === 'CompressorFixedP') {
+    } else if (
+      obj.cls === 'PPE2' ||
+      obj.cls === 'Wartungseinheit2' ||
+      obj.cls === 'Wartungseinheit' ||
+      obj.cls === 'CompressorFixedP'
+    ) {
       const nominalPressureBar =
         obj.cls === 'CompressorFixedP'
           ? getNumberProp(obj.props, 'P_LIM', 6.0)
           : getNumberProp(obj.props, 'P_SOLL', 6.0);
+      const lbl = getScalarProp(obj.props, 'label');
       node = {
         id,
         type: 'air_service_unit',
+        ...(lbl ? { label: lbl } : {}),
         params: { nominalPressureBar },
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
         layout,
         rawMetadata,
       };
@@ -1680,49 +1712,72 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     }
   }
 
-  // Fresh or patched authoring path -> emit valid FluidSIM 4.5 .ct text objects & connections
+  // Ensure every component has non-overlapping layout coordinates before emitting .ct geometry
+  const workingDoc = document.components.some((c) => !c.layout)
+    ? autoLayoutCircuit(document, { incremental: true })
+    : document;
+
+  // Fresh or patched authoring path -> emit valid FluidSIM 4.5 .ct text objects, BEGINSYM symbols & connections
   let nextObjId = 0;
   const allocObjId = () => nextObjId++;
 
+  const symAlloc = new CtSymbolAllocator();
   const objectBlocks: string[] = [];
   const gateLines: string[] = [];
   const connectionBlocks: string[] = [];
 
-  // Identify exhaust_silencer / blind_plug components attached to a single port -> embed as EX3 / EX4!
-  const embeddedExhaustByValvePort = new Map<string, { exhId: string; edgeId: string }>();
+  interface RawRect {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+  }
+  const occupiedRects: RawRect[] = [];
+  const labelCandidates: Array<{
+    compId: string;
+    label: string;
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+  }> = [];
+
+  // Identify exhaust_silencer / blind_plug components attached to ANY pneumatic port -> embed as EX3 / EX4!
+  const embeddedExhaustByPort = new Map<string, { exhId: string; edgeId: string }>();
   const embeddedPlugByPort = new Map<string, { plugId: string; edgeId: string }>();
   const embeddedTerminatorCompIds = new Set<string>();
   const embeddedTerminatorEdgeIds = new Set<string>();
 
-  const compById = new Map(document.components.map((c) => [c.id, c]));
-  const embeddableValveTypes = new Set(['valve_2_2', 'valve_3_2', 'valve_4_2', 'valve_5_2', 'valve_5_3']);
-  for (const edge of document.connections) {
+  const compById = new Map(workingDoc.components.map((c) => [c.id, c]));
+  const isTerminator = (t: string): boolean => t === 'exhaust_silencer' || t === 'blind_plug';
+
+  for (const edge of workingDoc.connections) {
     const cFrom = compById.get(edge.from.componentId);
     const cTo = compById.get(edge.to.componentId);
     if (!cFrom || !cTo) continue;
 
-    if (cTo.type === 'exhaust_silencer' && embeddableValveTypes.has(cFrom.type)) {
+    if (cTo.type === 'exhaust_silencer' && !isTerminator(cFrom.type)) {
       const key = `${cFrom.id}:${edge.from.port}`;
-      if (!embeddedExhaustByValvePort.has(key)) {
-        embeddedExhaustByValvePort.set(key, { exhId: cTo.id, edgeId: edge.id });
+      if (!embeddedExhaustByPort.has(key)) {
+        embeddedExhaustByPort.set(key, { exhId: cTo.id, edgeId: edge.id });
         embeddedTerminatorCompIds.add(cTo.id);
         embeddedTerminatorEdgeIds.add(edge.id);
       }
-    } else if (cFrom.type === 'exhaust_silencer' && embeddableValveTypes.has(cTo.type)) {
+    } else if (cFrom.type === 'exhaust_silencer' && !isTerminator(cTo.type)) {
       const key = `${cTo.id}:${edge.to.port}`;
-      if (!embeddedExhaustByValvePort.has(key)) {
-        embeddedExhaustByValvePort.set(key, { exhId: cFrom.id, edgeId: edge.id });
+      if (!embeddedExhaustByPort.has(key)) {
+        embeddedExhaustByPort.set(key, { exhId: cFrom.id, edgeId: edge.id });
         embeddedTerminatorCompIds.add(cFrom.id);
         embeddedTerminatorEdgeIds.add(edge.id);
       }
-    } else if (cTo.type === 'blind_plug' && cFrom.type !== 'blind_plug') {
+    } else if (cTo.type === 'blind_plug' && !isTerminator(cFrom.type)) {
       const key = `${cFrom.id}:${edge.from.port}`;
       if (!embeddedPlugByPort.has(key)) {
         embeddedPlugByPort.set(key, { plugId: cTo.id, edgeId: edge.id });
         embeddedTerminatorCompIds.add(cTo.id);
         embeddedTerminatorEdgeIds.add(edge.id);
       }
-    } else if (cFrom.type === 'blind_plug' && cTo.type !== 'blind_plug') {
+    } else if (cFrom.type === 'blind_plug' && !isTerminator(cTo.type)) {
       const key = `${cTo.id}:${edge.to.port}`;
       if (!embeddedPlugByPort.has(key)) {
         embeddedPlugByPort.set(key, { plugId: cFrom.id, edgeId: edge.id });
@@ -1732,36 +1787,149 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     }
   }
 
+  // Exact FluidSIM 4.5 raw unrotated (baseW, baseH) matching pneumatics45.ts * 3072 & ctSymbolLibrary.ts
+  const getRawBaseSize = (compType: string): { baseW: number; baseH: number } => {
+    switch (compType) {
+      case 'air_source':
+        return { baseW: 18432, baseH: 18432 };
+      case 'air_service_unit':
+        return { baseW: 122880, baseH: 67584 };
+      case 'air_filter':
+      case 'air_reservoir':
+      case 'quick_exhaust_valve':
+      case 'pressure_regulator':
+      case 'pressure_switch_differential':
+      case 'pressure_gauge':
+      case 'vacuum_sucker':
+        return { baseW: 24576, baseH: 24576 };
+      case 'pneumatic_junction':
+      case 'electrical_junction':
+        return { baseW: 12288, baseH: 12288 };
+      case 'pneumatic_manifold':
+        return { baseW: 122880, baseH: 12288 };
+      case 'cylinder_single_acting':
+      case 'cylinder_double_acting':
+      case 'cylinder_rodless':
+        return { baseW: 57344, baseH: 32768 };
+      case 'swivel_drive':
+      case 'air_motor':
+        return { baseW: 30720, baseH: 39936 };
+      case 'vacuum_suction_nozzle':
+        return { baseW: 36864, baseH: 30720 };
+      case 'valve_2_2':
+      case 'valve_3_2':
+      case 'valve_4_2':
+      case 'time_delay_valve':
+      case 'pressure_sequence_valve':
+        return { baseW: 86016, baseH: 36864 };
+      case 'valve_5_2':
+        return { baseW: 110592, baseH: 36864 };
+      case 'valve_5_3':
+        return { baseW: 147456, baseH: 36864 };
+      case 'flow_control_one_way':
+      case 'throttle_valve':
+        return { baseW: 46080, baseH: 61440 };
+      case 'check_valve':
+      case 'check_valve_spring':
+      case 'pressure_relief_valve':
+        return { baseW: 12288, baseH: 24576 };
+      case 'shuttle_valve_or':
+      case 'dual_pressure_valve_and':
+        return { baseW: 24576, baseH: 18432 };
+      case 'power_24v':
+      case 'power_0v':
+        return { baseW: 18432, baseH: 12288 };
+      case 'pushbutton_no':
+      case 'pushbutton_nc':
+      case 'relay_contact_changeover':
+        return { baseW: 15360, baseH: 30720 };
+      case 'limit_switch_no':
+      case 'limit_switch_nc':
+      case 'proximity_switch_magnetic':
+      case 'relay_contact_no':
+      case 'relay_contact_nc':
+      case 'indicator_lamp':
+        return { baseW: 12288, baseH: 30720 };
+      case 'relay_coil':
+        return { baseW: 24576, baseH: 30720 };
+      case 'timer_relay_on_delay':
+      case 'timer_relay_off_delay':
+        return { baseW: 36864, baseH: 30720 };
+      case 'electrical_counter':
+        return { baseW: 43008, baseH: 30720 };
+      case 'valve_solenoid':
+        return { baseW: 39936, baseH: 30720 };
+      default: {
+        const def = getCatalogComponent(compType);
+        return {
+          baseW: Math.round((def?.defaultSize.width ?? 16) * FS_UNIT_PER_MM),
+          baseH: Math.round((def?.defaultSize.height ?? 12) * FS_UNIT_PER_MM),
+        };
+      }
+    }
+  };
+
   // Map "<compId>:<portName>" -> FluidSIM port object ID
   const portObjIdMap = new Map<string, number>();
 
-  for (const comp of document.components) {
+  for (const comp of workingDoc.components) {
     if (embeddedTerminatorCompIds.has(comp.id)) continue;
 
     const parentId = allocObjId();
     const xMm = comp.layout?.x ?? 40;
     const yMm = comp.layout?.y ?? 40;
-    const x1 = Math.round(xMm * FS_UNIT_PER_MM);
-    const y1 = Math.round(yMm * FS_UNIT_PER_MM);
-    const x2 = x1 + 24 * FS_UNIT_PER_MM;
-    const y2 = y1 + 24 * FS_UNIT_PER_MM;
-    const rot = comp.rotationDeg ?? comp.layout?.rotationDeg ?? 0;
+    const x1 = Math.max(4096, Math.round(xMm * FS_UNIT_PER_MM));
+    const y1 = Math.max(57344, Math.round(yMm * FS_UNIT_PER_MM));
+    const rot = normalizeRotation(comp.rotationDeg ?? comp.layout?.rotationDeg ?? 0);
+    const { baseW, baseH } = getRawBaseSize(comp.type);
+    const boxW = rot === 90 || rot === 270 ? baseH : baseW;
+    const boxH = rot === 90 || rot === 270 ? baseW : baseH;
+    const x2 = x1 + boxW;
+    const y2 = y1 + boxH;
     const flip = comp.layout?.flipped ? 1 : 0;
 
+    occupiedRects.push({ x1, y1, x2, y2 });
+
+    const catDef = getCatalogComponent(comp.type);
+    const isPneumaticLabeled =
+      Boolean(comp.label && comp.label.trim().length > 0) && (catDef?.layoutLayer ?? 3) < 10;
+    if (isPneumaticLabeled && comp.label) {
+      labelCandidates.push({
+        compId: comp.id,
+        label: comp.label.trim(),
+        x1,
+        y1,
+        x2,
+        y2,
+      });
+    }
+
+    // Golden FluidSIM 4.5 port hitbox is 10240 x 10240 (+/-5120 around rotated port center)
     const addPortObj = (
       gateNum: number,
       cls: 'PConnection' | 'EConnection' | 'UEConnection' | 'UMConnection',
       portName?: string,
       extraProps: string[] = [],
+      explicitRawOffset?: { x: number; y: number },
     ): number => {
       const pid = allocObjId();
-      const portDef = portName ? getPortDefinition(comp.type, portName) : undefined;
-      const offX = portDef ? Math.round(portDef.offset.x * FS_UNIT_PER_MM) : gateNum * 3072;
-      const offY = portDef ? Math.round(portDef.offset.y * FS_UNIT_PER_MM) : 0;
-      const px1 = x1 + offX - 2048;
-      const py1 = y1 + offY - 2048;
-      const px2 = x1 + offX + 2048;
-      const py2 = y1 + offY + 2048;
+      let rawOffX: number;
+      let rawOffY: number;
+      if (explicitRawOffset) {
+        rawOffX = explicitRawOffset.x;
+        rawOffY = explicitRawOffset.y;
+      } else {
+        const portDef = portName ? getPortDefinition(comp.type, portName) : undefined;
+        rawOffX = portDef ? Math.round(portDef.offset.x * FS_UNIT_PER_MM) : gateNum * 3072;
+        rawOffY = portDef ? Math.round(portDef.offset.y * FS_UNIT_PER_MM) : 0;
+      }
+      const rotOff = rotatePortOffset({ x: rawOffX, y: rawOffY }, baseW, baseH, rot);
+      const cx = x1 + Math.round(rotOff.x);
+      const cy = y1 + Math.round(rotOff.y);
+      const px1 = cx - 5120;
+      const py1 = cy - 5120;
+      const px2 = cx + 5120;
+      const py2 = cy + 5120;
       const lines = [
         `${cls} O${pid} ${px1} ${py1} ${px2} ${py2} 0 0 348163`,
         ...extraProps,
@@ -1775,7 +1943,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     };
 
     const pPortProps = (portName: string): string[] => {
-      const embedded = embeddedExhaustByValvePort.get(`${comp.id}:${portName}`);
+      const embedded = embeddedExhaustByPort.get(`${comp.id}:${portName}`);
       if (embedded) {
         return [
           ' S ex_type_FEST B T',
@@ -1805,6 +1973,66 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       ];
     };
 
+    const emitDistanceRule = (ownerComp: ComponentNode): void => {
+      if (!ownerComp.distanceRule || ownerComp.distanceRule.length === 0) return;
+      const drId = allocObjId();
+      const drX1 = x1 + 4096;
+      const drY1 = y1 - 28672;
+      const drX2 = x1 + 36864;
+      const drY2 = y1 - 17408;
+      occupiedRects.push({ x1: drX1, y1: drY1, x2: drX2, y2: drY2 });
+      const drLines = [
+        `R_SCHALT O${drId} ${drX1} ${drY1} ${drX2} ${drY2} 0 0 4253703`,
+        ` S _MCP_OWNER_ID S ${ownerComp.id}`,
+      ];
+      ownerComp.distanceRule.forEach((m, idx) => {
+        drLines.push(` S label${idx} S ${m.label}`);
+        drLines.push(` S pos${idx} F ${m.positionMm}`);
+        drLines.push(` S pos_l_${idx} F ${m.positionMm}`);
+        drLines.push(` S pos_r_${idx} F ${m.positionMm}`);
+      });
+      objectBlocks.push(drLines.join('\n'));
+    };
+
+    const emitValveActuationPorts = (startGate: number): void => {
+      addPortObj(
+        startGate,
+        'UEConnection',
+        undefined,
+        comp.leftActuation?.type === 'solenoid' && comp.leftActuation.label
+          ? [` S label S ${comp.leftActuation.label}`]
+          : [],
+        { x: 0, y: 24576 },
+      );
+      addPortObj(
+        startGate + 1,
+        'UEConnection',
+        undefined,
+        comp.rightActuation?.type === 'solenoid' && comp.rightActuation.label
+          ? [` S label S ${comp.rightActuation.label}`]
+          : [],
+        { x: baseW, y: 24576 },
+      );
+      addPortObj(
+        startGate + 2,
+        'UMConnection',
+        undefined,
+        comp.leftActuation?.type === 'roller' && comp.leftActuation.label
+          ? [` S label S ${comp.leftActuation.label}`]
+          : [' S state INT 4'],
+        { x: 9216, y: 12288 },
+      );
+      addPortObj(
+        startGate + 3,
+        'UMConnection',
+        undefined,
+        comp.rightActuation?.type === 'roller' && comp.rightActuation.label
+          ? [` S label S ${comp.rightActuation.label}`]
+          : [' S state INT 4'],
+        { x: baseW - 9216, y: 12288 },
+      );
+    };
+
     const idProp = ` S _MCP_ID S ${comp.id}`;
     const labelProp = comp.label ? [` S label S ${comp.label}`] : [];
 
@@ -1827,10 +2055,13 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       }
       case 'air_service_unit': {
         const pBar = Number(comp.params.nominalPressureBar ?? 6);
+        const frlSym = symAlloc.alloc(buildWartungseinheit2Sym());
         objectBlocks.push(
           [
-            `PPE2 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3527683`,
+            `Wartungseinheit2 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3527683`,
             idProp,
+            ...labelProp,
+            ` S dxf_prim_list V ${frlSym}`,
             ' S NN_FLOW_FEST B T',
             ' S NN_FLOW F 750',
             ' S P_SOLL_FEST B T',
@@ -1853,28 +2084,26 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       case 'pneumatic_manifold': {
         // FluidSIM 4.5 C++ loader requires EVERY PTriconnection to have EXACTLY 4 PConnection gates
         // (fewer than 4 gates crashes fl_sim_p.exe with 0xC0000005).
-        // Represent an 8-port manifold as 3 chained 4-gate PTriconnection slices:
-        //   Slice 0 (parentId): gates 1..3 -> ports '1','2','3'; gate 4 -> internal bridge to Slice 1 gate 1
-        //   Slice 1 (slice1Id): gate 1 -> internal bridge; gates 2..3 -> ports '4','5'; gate 4 -> internal bridge to Slice 2 gate 1
-        //   Slice 2 (slice2Id): gate 1 -> internal bridge; gates 2..4 -> ports '6','7','8'
+        // Represent an 8-port manifold as 3 chained 4-gate PTriconnection slices spanning 122880 x 12288 (40 x 4 mm):
+        //   Slice 0 (x1 .. x1+12288): gates 1..3 -> ports '1','2','3'; gate 4 -> bridge to Slice 1
+        //   Slice 1 (x1+55296 .. x1+67584): gate 1 -> bridge; gates 2..3 -> ports '4','5'; gate 4 -> bridge to Slice 2
+        //   Slice 2 (x1+110592 .. x1+122880): gate 1 -> bridge; gates 2..4 -> ports '6','7','8'
         const busRole = String(comp.params.busRole ?? 'supply');
-        const sliceStep = 14336; // 14 mm horizontal spacing between chained manifold nodes
+        const sliceStep = 55296; // 18 mm horizontal spacing between chained manifold nodes
 
         const addSlicePort = (
           sliceParentId: number,
-          sliceX1: number,
           gateNum: number,
+          rawCx: number,
+          rawCy: number,
           portName?: string,
           extraProps: string[] = [],
         ): number => {
           const pid = allocObjId();
-          const portDef = portName ? getPortDefinition(comp.type, portName) : undefined;
-          const offX = portDef ? Math.round(portDef.offset.x * FS_UNIT_PER_MM) : gateNum * 3072;
-          const offY = portDef ? Math.round(portDef.offset.y * FS_UNIT_PER_MM) : 0;
-          const px1 = (portDef ? x1 : sliceX1) + offX - 2048;
-          const py1 = y1 + offY - 2048;
-          const px2 = px1 + 4096;
-          const py2 = py1 + 4096;
+          const px1 = rawCx - 5120;
+          const py1 = rawCy - 5120;
+          const px2 = rawCx + 5120;
+          const py2 = rawCy + 5120;
           objectBlocks.push([`PConnection O${pid} ${px1} ${py1} ${px2} ${py2} 0 0 348163`, ...extraProps].join('\n'));
           gateLines.push(`gate${gateNum} # ${sliceParentId} ${pid}`);
           if (portName) {
@@ -1896,10 +2125,10 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             '\n',
           ),
         );
-        addSlicePort(parentId, x1, 1, '1', [...pPortProps('1'), ' S _MCP_MANIFOLD_PORT S 1']);
-        addSlicePort(parentId, x1, 2, '2', [...pPortProps('2'), ' S _MCP_MANIFOLD_PORT S 2']);
-        addSlicePort(parentId, x1, 3, '3', [...pPortProps('3'), ' S _MCP_MANIFOLD_PORT S 3']);
-        const s0BridgeOut = addSlicePort(parentId, x1, 4, undefined, [
+        addSlicePort(parentId, 1, x1, y1 + 6144, '1', [...pPortProps('1'), ' S _MCP_MANIFOLD_PORT S 1']);
+        addSlicePort(parentId, 2, x1 + 6144, y1, '2', [...pPortProps('2'), ' S _MCP_MANIFOLD_PORT S 2']);
+        addSlicePort(parentId, 3, x1 + 6144, y1 + 12288, '3', [...pPortProps('3'), ' S _MCP_MANIFOLD_PORT S 3']);
+        const s0BridgeOut = addSlicePort(parentId, 4, x1 + 12288, y1 + 6144, undefined, [
           ' S ex_type_FEST B T',
           ' S ex_type S EX0',
           ' S R_H_FEST B T',
@@ -1915,15 +2144,15 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             ...sliceMeta(1),
           ].join('\n'),
         );
-        const s1BridgeIn = addSlicePort(slice1Id, s1x1, 1, undefined, [
+        const s1BridgeIn = addSlicePort(slice1Id, 1, s1x1, y1 + 6144, undefined, [
           ' S ex_type_FEST B T',
           ' S ex_type S EX0',
           ' S R_H_FEST B T',
           ' S R_H F 0',
         ]);
-        addSlicePort(slice1Id, s1x1, 2, '4', [...pPortProps('4'), ' S _MCP_MANIFOLD_PORT S 4']);
-        addSlicePort(slice1Id, s1x1, 3, '5', [...pPortProps('5'), ' S _MCP_MANIFOLD_PORT S 5']);
-        const s1BridgeOut = addSlicePort(slice1Id, s1x1, 4, undefined, [
+        addSlicePort(slice1Id, 2, s1x1 + 6144, y1, '4', [...pPortProps('4'), ' S _MCP_MANIFOLD_PORT S 4']);
+        addSlicePort(slice1Id, 3, s1x1 + 6144, y1 + 12288, '5', [...pPortProps('5'), ' S _MCP_MANIFOLD_PORT S 5']);
+        const s1BridgeOut = addSlicePort(slice1Id, 4, s1x1 + 12288, y1 + 6144, undefined, [
           ' S ex_type_FEST B T',
           ' S ex_type S EX0',
           ' S R_H_FEST B T',
@@ -1939,15 +2168,15 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             ...sliceMeta(2),
           ].join('\n'),
         );
-        const s2BridgeIn = addSlicePort(slice2Id, s2x1, 1, undefined, [
+        const s2BridgeIn = addSlicePort(slice2Id, 1, s2x1, y1 + 6144, undefined, [
           ' S ex_type_FEST B T',
           ' S ex_type S EX0',
           ' S R_H_FEST B T',
           ' S R_H F 0',
         ]);
-        addSlicePort(slice2Id, s2x1, 2, '6', [...pPortProps('6'), ' S _MCP_MANIFOLD_PORT S 6']);
-        addSlicePort(slice2Id, s2x1, 3, '7', [...pPortProps('7'), ' S _MCP_MANIFOLD_PORT S 7']);
-        addSlicePort(slice2Id, s2x1, 4, '8', [...pPortProps('8'), ' S _MCP_MANIFOLD_PORT S 8']);
+        addSlicePort(slice2Id, 2, s2x1 + 6144, y1, '6', [...pPortProps('6'), ' S _MCP_MANIFOLD_PORT S 6']);
+        addSlicePort(slice2Id, 3, s2x1 + 6144, y1 + 12288, '7', [...pPortProps('7'), ' S _MCP_MANIFOLD_PORT S 7']);
+        addSlicePort(slice2Id, 4, s2x1 + 12288, y1 + 6144, '8', [...pPortProps('8'), ' S _MCP_MANIFOLD_PORT S 8']);
 
         // Internal manifold bridge PLine connections (ignored when reparsing semantic graph)
         connectionBlocks.push(
@@ -1969,11 +2198,13 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       case 'vacuum_suction_nozzle': {
         const vacuumBar = Number(comp.params.vacuumBar ?? -0.7);
         const minSupplyBar = Number(comp.params.minSupplyBar ?? 3.0);
+        const vacSym = symAlloc.alloc(buildVacuumNozzleSym());
         objectBlocks.push(
           [
-            `PAV1 O${parentId} ${x1} ${y1} ${x1 + 24576} ${y1 + 24576} ${rot} ${flip} 3527683`,
+            `PAV1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3527683`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${vacSym}`,
             ' S FLIPPED I 1',
             ` S _MCP_VAC_BAR F ${vacuumBar}`,
             ` S _MCP_MIN_SUP F ${minSupplyBar}`,
@@ -1986,11 +2217,13 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       }
       case 'vacuum_sucker': {
         const gripThresholdBar = Number(comp.params.gripThresholdBar ?? -0.3);
+        const cupSym = symAlloc.alloc(buildVacuumSuckerSym());
         objectBlocks.push(
           [
-            `PAV1S O${parentId} ${x1} ${y1} ${x1 + 20480} ${y1 + 20480} ${rot} ${flip} 3527683`,
+            `PAV1S O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3527683`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${cupSym}`,
             ` S _MCP_GRIP_BAR F ${gripThresholdBar}`,
           ].join('\n'),
         );
@@ -2002,11 +2235,13 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const initDeg = Number(comp.params.initialAngleDeg ?? 0);
         const torqueNm = Number(comp.params.torqueNm ?? 5);
         const loadNm = Number(comp.params.externalLoadNm ?? 0);
+        const swvSym = symAlloc.alloc(buildSwivelDriveSym());
         objectBlocks.push(
           [
-            `PAR1b O${parentId} ${x1} ${y1} ${x1 + 40960} ${y1 + 32768} ${rot} ${flip} 4986883`,
+            `PAR1b O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4986883`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${swvSym}`,
             ' S ALPHA_FEST B T',
             ` S ALPHA F ${maxAngleDeg}`,
             ' S l1 F 0',
@@ -2016,22 +2251,9 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             ...(loadNm !== 0 ? [` S _MCP_LOAD_NM F ${loadNm}`] : []),
           ].join('\n'),
         );
-        addPortObj(1, 'PConnection', 'A', pPortProps('A'));
-        addPortObj(2, 'PConnection', 'B', pPortProps('B'));
-        if (comp.distanceRule && comp.distanceRule.length > 0) {
-          const drId = allocObjId();
-          const drLines = [
-            `R_SCHALT O${drId} ${x1 + 10240} ${y1 - 24576} ${x1 + 40960} ${y1 - 12288} 0 0 4253703`,
-            ` S _MCP_OWNER_ID S ${comp.id}`,
-          ];
-          comp.distanceRule.forEach((m, idx) => {
-            drLines.push(` S label${idx} S ${m.label}`);
-            drLines.push(` S pos${idx} F ${m.positionMm}`);
-            drLines.push(` S pos_l_${idx} F ${m.positionMm}`);
-            drLines.push(` S pos_r_${idx} F ${m.positionMm}`);
-          });
-          objectBlocks.push(drLines.join('\n'));
-        }
+        addPortObj(1, 'PConnection', 'A', pPortProps('A'), { x: 7168, y: 39936 });
+        addPortObj(2, 'PConnection', 'B', pPortProps('B'), { x: 23552, y: 39936 });
+        emitDistanceRule(comp);
         break;
       }
       case 'cylinder_single_acting':
@@ -2046,10 +2268,15 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const initPos = Number(comp.params.initialPositionMm ?? 0);
         const springForceN = Number(comp.params.springForceN ?? 25);
         const cushioning = comp.params.cushioning !== false;
+        const cylSyms = buildCylinderSyms(isSac);
+        const bodySym = symAlloc.alloc(cylSyms.body);
+        const rodSym = symAlloc.alloc(cylSyms.rod);
         const lines = [
-          `CylDGPPAB O${parentId} ${x1} ${y1} ${x1 + 57344} ${y1 + 32768} ${rot} ${flip} 4986883`,
+          `CylDGPPAB O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4986883`,
           idProp,
           ...labelProp,
+          ` S dxf_prim_list V ${bodySym}`,
+          ` S dxf_prim_list2 V ${rodSym}`,
           ' S description_FEST B T',
           ` S description S ${isSac ? 'Zylinder, einfachwirkend' : 'Zylinder, doppeltwirkend'}`,
           ' S MoName_FEST B T',
@@ -2073,33 +2300,22 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
               : []),
         ];
         objectBlocks.push(lines.join('\n'));
-        addPortObj(1, 'PConnection', 'A', pPortProps('A'));
+        addPortObj(1, 'PConnection', 'A', pPortProps('A'), { x: 4096, y: 32768 });
         if (!isSac) {
-          addPortObj(2, 'PConnection', 'B', pPortProps('B'));
+          addPortObj(2, 'PConnection', 'B', pPortProps('B'), { x: 53248, y: 32768 });
         }
-        if (comp.distanceRule && comp.distanceRule.length > 0) {
-          const drId = allocObjId();
-          const drLines = [
-            `R_SCHALT O${drId} ${x1 + 10240} ${y1 - 24576} ${x1 + 40960} ${y1 - 12288} 0 0 4253703`,
-            ` S _MCP_OWNER_ID S ${comp.id}`,
-          ];
-          comp.distanceRule.forEach((m, idx) => {
-            drLines.push(` S label${idx} S ${m.label}`);
-            drLines.push(` S pos${idx} F ${m.positionMm}`);
-            drLines.push(` S pos_l_${idx} F ${m.positionMm}`);
-            drLines.push(` S pos_r_${idx} F ${m.positionMm}`);
-          });
-          objectBlocks.push(drLines.join('\n'));
-        }
+        emitDistanceRule(comp);
         break;
       }
       case 'air_filter': {
         const flow = Number(comp.params.nominalFlowLMin ?? 500);
+        const fltSym = symAlloc.alloc(buildFilterSym());
         objectBlocks.push(
           [
-            `FilterP O${parentId} ${x1} ${y1} ${x1 + 20480} ${y1 + 20480} ${rot} ${flip} 3527683`,
+            `FilterP O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3527683`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${fltSym}`,
             ' S NN_FLOW_FEST B T',
             ` S NN_FLOW F ${flow}`,
           ].join('\n'),
@@ -2111,11 +2327,20 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       case 'valve_2_2': {
         const flow = Number(comp.params.nominalFlowLMin ?? 200);
         const isNO = comp.params.normalState === 'NO' || comp.params.normallyOpen === true;
+        const vSym = symAlloc.alloc(
+          buildValveSym('valve_2_2', {
+            leftActuation: comp.leftActuation,
+            rightActuation: comp.rightActuation,
+            normallyOpen: isNO,
+          }),
+        );
+        const vFlip = comp.layout?.flipped ? 1 : -18432;
         objectBlocks.push(
           [
-            `WV_2 O${parentId} ${x1} ${y1} ${x1 + 73728} ${y1 + 36864} ${rot} ${flip} 1617923`,
+            `WV_2 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${vFlip} 1617923`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${vSym}`,
             ' S description_FEST B T',
             ' S description S 2/n Way Valve',
             ' S BODY_COUNT I 2',
@@ -2142,48 +2367,26 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         addPortObj(2, 'PConnection', '1', pPortProps('1'));
         addPortObj(3, 'PConnection', '12', pPortProps('12'));
         addPortObj(4, 'PConnection', '10', pPortProps('10'));
-        addPortObj(
-          5,
-          'UEConnection',
-          undefined,
-          comp.leftActuation?.type === 'solenoid' && comp.leftActuation.label
-            ? [` S label S ${comp.leftActuation.label}`]
-            : [],
-        );
-        addPortObj(
-          6,
-          'UEConnection',
-          undefined,
-          comp.rightActuation?.type === 'solenoid' && comp.rightActuation.label
-            ? [` S label S ${comp.rightActuation.label}`]
-            : [],
-        );
-        addPortObj(
-          7,
-          'UMConnection',
-          undefined,
-          comp.leftActuation?.type === 'roller' && comp.leftActuation.label
-            ? [` S label S ${comp.leftActuation.label}`]
-            : [' S state INT 4'],
-        );
-        addPortObj(
-          8,
-          'UMConnection',
-          undefined,
-          comp.rightActuation?.type === 'roller' && comp.rightActuation.label
-            ? [` S label S ${comp.rightActuation.label}`]
-            : [' S state INT 4'],
-        );
+        emitValveActuationPorts(5);
         break;
       }
       case 'valve_3_2': {
         const flow = Number(comp.params.nominalFlowLMin ?? 120);
         const isNO = comp.params.normalState === 'NO' || comp.params.normallyOpen === true;
+        const vSym = symAlloc.alloc(
+          buildValveSym('valve_3_2', {
+            leftActuation: comp.leftActuation,
+            rightActuation: comp.rightActuation,
+            normallyOpen: isNO,
+          }),
+        );
+        const vFlip = comp.layout?.flipped ? 1 : -18432;
         objectBlocks.push(
           [
-            `WV_3 O${parentId} ${x1} ${y1} ${x1 + 86016} ${y1 + 36864} ${rot} ${flip} 1617923`,
+            `WV_3 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${vFlip} 1617923`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${vSym}`,
             ' S description_FEST B T',
             ' S description S 3/n Way Valve',
             ' S BODY_COUNT I 2',
@@ -2211,48 +2414,25 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         addPortObj(3, 'PConnection', '3', pPortProps('3'));
         addPortObj(4, 'PConnection', '12', pPortProps('12'));
         addPortObj(5, 'PConnection', '10', pPortProps('10'));
-        addPortObj(
-          6,
-          'UEConnection',
-          undefined,
-          comp.leftActuation?.type === 'solenoid' && comp.leftActuation.label
-            ? [` S label S ${comp.leftActuation.label}`]
-            : [],
-        );
-        addPortObj(
-          7,
-          'UEConnection',
-          undefined,
-          comp.rightActuation?.type === 'solenoid' && comp.rightActuation.label
-            ? [` S label S ${comp.rightActuation.label}`]
-            : [],
-        );
-        addPortObj(
-          8,
-          'UMConnection',
-          undefined,
-          comp.leftActuation?.type === 'roller' && comp.leftActuation.label
-            ? [` S label S ${comp.leftActuation.label}`]
-            : [' S state INT 4'],
-        );
-        addPortObj(
-          9,
-          'UMConnection',
-          undefined,
-          comp.rightActuation?.type === 'roller' && comp.rightActuation.label
-            ? [` S label S ${comp.rightActuation.label}`]
-            : [' S state INT 4'],
-        );
+        emitValveActuationPorts(6);
         break;
       }
       case 'valve_4_2': {
         const flow = Number(comp.params.nominalFlowLMin ?? 400);
         const initialState = comp.params.initialState === 'left' ? 'left' : 'right';
+        const vSym = symAlloc.alloc(
+          buildValveSym('valve_4_2', {
+            leftActuation: comp.leftActuation,
+            rightActuation: comp.rightActuation,
+          }),
+        );
+        const vFlip = comp.layout?.flipped ? 1 : -18432;
         objectBlocks.push(
           [
-            `WV_4 O${parentId} ${x1} ${y1} ${x1 + 98304} ${y1 + 36864} ${rot} ${flip} 5109763`,
+            `WV_4 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${vFlip} 5109763`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${vSym}`,
             ' S description_FEST B T',
             ' S description S 4/n Way Valve',
             ' S BODY_COUNT I 2',
@@ -2268,38 +2448,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         addPortObj(4, 'PConnection', '3', pPortProps('3'));
         addPortObj(5, 'PConnection', '14', pPortProps('14'));
         addPortObj(6, 'PConnection', '12', pPortProps('12'));
-        addPortObj(
-          7,
-          'UEConnection',
-          undefined,
-          comp.leftActuation?.type === 'solenoid' && comp.leftActuation.label
-            ? [` S label S ${comp.leftActuation.label}`]
-            : [],
-        );
-        addPortObj(
-          8,
-          'UEConnection',
-          undefined,
-          comp.rightActuation?.type === 'solenoid' && comp.rightActuation.label
-            ? [` S label S ${comp.rightActuation.label}`]
-            : [],
-        );
-        addPortObj(
-          9,
-          'UMConnection',
-          undefined,
-          comp.leftActuation?.type === 'roller' && comp.leftActuation.label
-            ? [` S label S ${comp.leftActuation.label}`]
-            : [' S state INT 4'],
-        );
-        addPortObj(
-          10,
-          'UMConnection',
-          undefined,
-          comp.rightActuation?.type === 'roller' && comp.rightActuation.label
-            ? [` S label S ${comp.rightActuation.label}`]
-            : [' S state INT 4'],
-        );
+        emitValveActuationPorts(7);
         break;
       }
       case 'valve_5_2':
@@ -2308,11 +2457,20 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const bodyCount = comp.type === 'valve_5_3' ? 3 : 2;
         const initialState = comp.params.initialState === 'left' ? 'left' : 'right';
         const centerType = String(comp.params.centerType ?? 'closed');
+        const vSym = symAlloc.alloc(
+          buildValveSym(comp.type, {
+            leftActuation: comp.leftActuation,
+            rightActuation: comp.rightActuation,
+            centerType,
+          }),
+        );
+        const vFlip = comp.layout?.flipped ? 1 : -30720;
         objectBlocks.push(
           [
-            `WV_5 O${parentId} ${x1} ${y1} ${x1 + 110592} ${y1 + 36864} ${rot} ${flip} 5109763`,
+            `WV_5 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${vFlip} 5109763`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${vSym}`,
             ' S description_FEST B T',
             ' S description S 5/n Way Valve',
             ` S BODY_COUNT I ${bodyCount}`,
@@ -2330,48 +2488,19 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         addPortObj(5, 'PConnection', '3', pPortProps('3'));
         addPortObj(6, 'PConnection', '14', pPortProps('14'));
         addPortObj(7, 'PConnection', '12', pPortProps('12'));
-        addPortObj(
-          8,
-          'UEConnection',
-          undefined,
-          comp.leftActuation?.type === 'solenoid' && comp.leftActuation.label
-            ? [` S label S ${comp.leftActuation.label}`]
-            : [],
-        );
-        addPortObj(
-          9,
-          'UEConnection',
-          undefined,
-          comp.rightActuation?.type === 'solenoid' && comp.rightActuation.label
-            ? [` S label S ${comp.rightActuation.label}`]
-            : [],
-        );
-        addPortObj(
-          10,
-          'UMConnection',
-          undefined,
-          comp.leftActuation?.type === 'roller' && comp.leftActuation.label
-            ? [` S label S ${comp.leftActuation.label}`]
-            : [' S state INT 4'],
-        );
-        addPortObj(
-          11,
-          'UMConnection',
-          undefined,
-          comp.rightActuation?.type === 'roller' && comp.rightActuation.label
-            ? [` S label S ${comp.rightActuation.label}`]
-            : [' S state INT 4'],
-        );
+        emitValveActuationPorts(8);
         break;
       }
       case 'flow_control_one_way': {
         const openingPct = Number(comp.params.openingPct ?? 50);
         const freeFlow = comp.params.freeFlowDirection === '2_to_1' ? '2_to_1' : '1_to_2';
+        const fcSym = symAlloc.alloc(buildFlowControlOneWaySym());
         objectBlocks.push(
           [
-            `DRSV2_pneu O${parentId} ${x1} ${y1} ${x1 + 15360} ${y1 + 43008} ${rot} ${flip} 6940243`,
+            `DRSV2_pneu O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 6940243`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${fcSym}`,
             ' S LEVEL_FEST B T',
             ` S LEVEL F ${openingPct}`,
             ' S NN_FLOW_FEST B T',
@@ -2386,13 +2515,15 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       case 'throttle_valve': {
         const openingPct = Number(comp.params.openingPct ?? 50);
         const paramsB64 = Buffer.from(JSON.stringify(comp.params), 'utf8').toString('base64');
+        const thSym = symAlloc.alloc(buildThrottleValveSym());
         objectBlocks.push(
           [
-            `DRSV2_pneu O${parentId} ${x1} ${y1} ${x1 + 15360} ${y1 + 32768} ${rot} ${flip} 6940243`,
+            `DRSV2_pneu O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 6940243`,
             idProp,
             ' S _MCP_TYPE S throttle_valve',
             ` S _MCP_PARAMS S ${paramsB64}`,
             ...labelProp,
+            ` S dxf_prim_list V ${thSym}`,
             ' S LEVEL_FEST B T',
             ` S LEVEL F ${openingPct}`,
             ' S NN_FLOW_FEST B T',
@@ -2404,11 +2535,13 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         break;
       }
       case 'quick_exhaust_valve': {
+        const qeSym = symAlloc.alloc(buildQuickExhaustSym());
         objectBlocks.push(
           [
-            `DV_P1 O${parentId} ${x1} ${y1} ${x1 + 20480} ${y1 + 20480} ${rot} ${flip} 6940243`,
+            `DV_P1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 6940243`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${qeSym}`,
           ].join('\n'),
         );
         addPortObj(1, 'PConnection', '1', pPortProps('1'));
@@ -2418,11 +2551,16 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       }
       case 'check_valve': {
         const crack = Number(comp.params.crackingPressureBar ?? 0.1);
+        const chkSyms = buildCheckValveSyms(false);
+        const closedSym = symAlloc.alloc(chkSyms.closed);
+        const openSym = symAlloc.alloc(chkSyms.open);
         objectBlocks.push(
           [
-            `CheckValveP O${parentId} ${x1} ${y1} ${x1 + 15360} ${y1 + 20480} ${rot} ${flip} 6940243`,
+            `CheckValveP O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 6940243`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${closedSym}`,
+            ` S dxf_prim_list2 V ${openSym}`,
             ` S P_V F ${crack}`,
           ].join('\n'),
         );
@@ -2432,17 +2570,22 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       }
       case 'check_valve_spring': {
         const crack = Number(comp.params.crackingPressureBar ?? 0.3);
-        const hasPilot12 = document.connections.some(
+        const hasPilot12 = workingDoc.connections.some(
           (e) =>
             (e.from.componentId === comp.id && e.from.port === '12') ||
             (e.to.componentId === comp.id && e.to.port === '12'),
         );
         const cls = hasPilot12 ? 'CheckValvePilotOperatedSpringLoadedP' : 'CheckValveSpringLoadedP';
+        const chkSyms = buildCheckValveSyms(true);
+        const closedSym = symAlloc.alloc(chkSyms.closed);
+        const openSym = symAlloc.alloc(chkSyms.open);
         objectBlocks.push(
           [
-            `${cls} O${parentId} ${x1} ${y1} ${x1 + 20480} ${y1 + 20480} ${rot} ${flip} 6940243`,
+            `${cls} O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 6940243`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${closedSym}`,
+            ` S dxf_prim_list2 V ${openSym}`,
             ` S P_V F ${crack}`,
           ].join('\n'),
         );
@@ -2454,11 +2597,13 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         break;
       }
       case 'shuttle_valve_or': {
+        const orSym = symAlloc.alloc(buildShuttleValveOrSym());
         objectBlocks.push(
           [
-            `PVS3 O${parentId} ${x1} ${y1} ${x1 + 24576} ${y1 + 18432} ${rot} ${flip} 4311043`,
+            `PVS3 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4311043`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${orSym}`,
           ].join('\n'),
         );
         addPortObj(1, 'PConnection', '1', pPortProps('1'));
@@ -2467,11 +2612,13 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         break;
       }
       case 'dual_pressure_valve_and': {
+        const andSym = symAlloc.alloc(buildDualPressureAndSym());
         objectBlocks.push(
           [
-            `DRSV2_pneu O${parentId} ${x1} ${y1} ${x1 + 24576} ${y1 + 18432} ${rot} ${flip} 4311043`,
+            `DRSV2_pneu O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4311043`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${andSym}`,
           ].join('\n'),
         );
         addPortObj(1, 'PConnection', '1', pPortProps('1'));
@@ -2481,11 +2628,13 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       }
       case 'pressure_regulator': {
         const setBar = Number(comp.params.setPressureBar ?? 4.0);
+        const regSym = symAlloc.alloc(buildPressureRegulatorSym());
         objectBlocks.push(
           [
-            `PressureReducingValve3WaysAdjustableP O${parentId} ${x1} ${y1} ${x1 + 24576} ${y1 + 20480} ${rot} ${flip} 3527683`,
+            `PressureReducingValve3WaysAdjustableP O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3527683`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${regSym}`,
             ' S P_SOLL_FEST B T',
             ` S P_SOLL F ${setBar}`,
           ].join('\n'),
@@ -2498,11 +2647,13 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const pBar = Number(comp.params.pressureBar ?? -0.5);
         const hyst = Number(comp.params.hysteresisBar ?? 0.05);
         const trigMode = String(comp.params.triggerMode ?? 'auto');
+        const pswSym = symAlloc.alloc(buildPressureSwitchSym());
         objectBlocks.push(
           [
-            `PEW O${parentId} ${x1} ${y1} ${x1 + 24576} ${y1 + 20480} ${rot} ${flip} 3527683`,
+            `PSW1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3527683`,
             idProp,
             ...labelProp,
+            ` S dxf_prim_list V ${pswSym}`,
             ' S P_SOLL_FEST B T',
             ` S P_SOLL F ${pBar}`,
             ` S _MCP_HYST F ${hyst}`,
@@ -2515,21 +2666,21 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       }
       case 'power_24v': {
         objectBlocks.push(
-          [`pol2 O${parentId} ${x1} ${y1} ${x1 + 18432} ${y1 + 12288} ${rot} ${flip} 4126728`, idProp].join('\n'),
+          [`pol2 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4126728`, idProp].join('\n'),
         );
         addPortObj(1, 'EConnection', 'OUT');
         break;
       }
       case 'power_0v': {
         objectBlocks.push(
-          [`pol1 O${parentId} ${x1} ${y1} ${x1 + 18432} ${y1 + 12288} ${rot} ${flip} 184328`, idProp].join('\n'),
+          [`pol1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 184328`, idProp].join('\n'),
         );
         addPortObj(1, 'EConnection', 'IN');
         break;
       }
       case 'electrical_junction': {
         objectBlocks.push(
-          [`ETriconnection O${parentId} ${x1} ${y1} ${x1 + 12288} ${y1 + 12288} ${rot} ${flip} 4321283`, idProp].join('\n'),
+          [`ETriconnection O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4321283`, idProp].join('\n'),
         );
         for (let g = 1; g <= 4; g++) {
           addPortObj(g, 'EConnection', String(g));
@@ -2539,7 +2690,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       case 'pushbutton_no': {
         const cls = comp.params.detent ? 'E_S031' : 'E_S011';
         objectBlocks.push(
-          [`${cls} O${parentId} ${x1} ${y1} ${x1 + 15360} ${y1 + 30720} ${rot} ${flip} 4142088`, idProp, ...labelProp].join(
+          [`${cls} O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4142088`, idProp, ...labelProp].join(
             '\n',
           ),
         );
@@ -2551,7 +2702,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const isDetent = Boolean(comp.params.detent);
         objectBlocks.push(
           [
-            `E_S012 O${parentId} ${x1} ${y1} ${x1 + 15360} ${y1 + 30720} ${rot} ${flip} 4454408`,
+            `E_S012 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4454408`,
             idProp,
             ...(isDetent ? [' S _MCP_DETENT B T'] : []),
             ...labelProp,
@@ -2566,7 +2717,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const switchType = comp.type === 'limit_switch_no' ? 1 : 0;
         objectBlocks.push(
           [
-            `E_S001 O${parentId} ${x1} ${y1} ${x1 + 12288} ${y1 + 30720} ${rot} ${flip} 3665928`,
+            `E_S001 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3665928`,
             idProp,
             ` S SWITCH_TYPE I ${switchType}`,
             ...labelProp,
@@ -2581,7 +2732,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const switchType = comp.type === 'limit_switch_nc' ? 1 : 0;
         objectBlocks.push(
           [
-            `E_S002 O${parentId} ${x1} ${y1} ${x1 + 12288} ${y1 + 30720} ${rot} ${flip} 1472008`,
+            `E_S002 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 1472008`,
             idProp,
             ` S SWITCH_TYPE I ${switchType}`,
             ...labelProp,
@@ -2593,7 +2744,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       }
       case 'relay_coil': {
         objectBlocks.push(
-          [`E_K001 O${parentId} ${x1} ${y1} ${x1 + 24576} ${y1 + 30720} ${rot} ${flip} 645133`, idProp, ...labelProp].join(
+          [`E_K001 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 645133`, idProp, ...labelProp].join(
             '\n',
           ),
         );
@@ -2605,7 +2756,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const delayTenths = Math.max(0.1, Math.round((Number(comp.params.delayMs ?? 1000) / 100) * 10) / 10);
         objectBlocks.push(
           [
-            `E_K008 O${parentId} ${x1} ${y1} ${x1 + 36864} ${y1 + 30720} ${rot} ${flip} 1105928`,
+            `E_K008 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 1105928`,
             idProp,
             ' S DELAY_TIME_FEST B T',
             ` S DELAY_TIME F ${delayTenths}`,
@@ -2620,7 +2771,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const preset = Number(comp.params.presetCount ?? 3);
         objectBlocks.push(
           [
-            `E_P010 O${parentId} ${x1} ${y1} ${x1 + 43008} ${y1 + 30720} ${rot} ${flip} 2508808`,
+            `E_P010 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 2508808`,
             idProp,
             ' S J_FEST B T',
             ` S J F ${preset}`,
@@ -2637,7 +2788,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       }
       case 'valve_solenoid': {
         objectBlocks.push(
-          [`E_Y001 O${parentId} ${x1} ${y1} ${x1 + 39936} ${y1 + 30720} ${rot} ${flip} 9113608`, idProp, ...labelProp].join(
+          [`E_Y001 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 9113608`, idProp, ...labelProp].join(
             '\n',
           ),
         );
@@ -2649,7 +2800,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const rgb = lampColorToRgbInt(String(comp.params.color ?? 'green'));
         objectBlocks.push(
           [
-            `lampe O${parentId} ${x1} ${y1} ${x1 + 12288} ${y1 + 30720} ${rot} ${flip} 4126728`,
+            `lampe O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4126728`,
             idProp,
             ` S sig_color I ${rgb}`,
             ...labelProp,
@@ -2661,7 +2812,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       }
       case 'relay_contact_changeover': {
         objectBlocks.push(
-          [`LWechsler O${parentId} ${x1} ${y1} ${x1 + 15360} ${y1 + 30720} ${rot} ${flip} 3665928`, idProp, ...labelProp].join(
+          [`LWechsler O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3665928`, idProp, ...labelProp].join(
             '\n',
           ),
         );
@@ -2674,7 +2825,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const delayTenths = Math.max(0.1, Math.round((Number(comp.params.delayMs ?? 1000) / 100) * 10) / 10);
         objectBlocks.push(
           [
-            `LRelaismagnet_abfver O${parentId} ${x1} ${y1} ${x1 + 36864} ${y1 + 30720} ${rot} ${flip} 1105928`,
+            `LRelaismagnet_abfver O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 1105928`,
             idProp,
             ' S DELAY_TIME_FEST B T',
             ` S DELAY_TIME F ${delayTenths}`,
@@ -2704,7 +2855,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
           cylinder_rodless: { cls: 'CylDGPPAB', ports: ['A', 'B'] },
           air_motor: { cls: 'PAR1b', ports: ['A', 'B'] },
           air_reservoir: { cls: 'FilterP', ports: ['1', '2'] },
-          pressure_relief_valve: { cls: 'CheckValveSpringLoadedP', ports: ['1', '2'] },
+          pressure_relief_valve: { cls: 'CheckValveSpringLoadedP', ports: ['1', '3'] },
           pressure_gauge: { cls: 'PSW1', ports: ['1'] },
           proximity_switch_magnetic: { cls: 'E_S001', ports: ['13', '14'] },
           time_delay_valve: { cls: 'WV_3', ports: ['2', '1', '3', '12', '10'] },
@@ -2715,12 +2866,39 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const mapped = nativeFallbackMap[comp.type];
         const baseCls = mapped ? mapped.cls : isElec ? 'E_K001' : 'PTriconnection';
 
+        const extraSymProps: string[] = [];
+        if (baseCls === 'CylDGPPAB') {
+          const syms = buildCylinderSyms(false);
+          extraSymProps.push(` S dxf_prim_list V ${symAlloc.alloc(syms.body)}`);
+          extraSymProps.push(` S dxf_prim_list2 V ${symAlloc.alloc(syms.rod)}`);
+        } else if (baseCls === 'PAR1b') {
+          extraSymProps.push(` S dxf_prim_list V ${symAlloc.alloc(buildSwivelDriveSym())}`);
+        } else if (baseCls === 'FilterP') {
+          extraSymProps.push(` S dxf_prim_list V ${symAlloc.alloc(buildFilterSym())}`);
+        } else if (baseCls === 'CheckValveSpringLoadedP') {
+          const syms = buildCheckValveSyms(true);
+          extraSymProps.push(` S dxf_prim_list V ${symAlloc.alloc(syms.closed)}`);
+          extraSymProps.push(` S dxf_prim_list2 V ${symAlloc.alloc(syms.open)}`);
+        } else if (baseCls === 'PSW1') {
+          extraSymProps.push(` S dxf_prim_list V ${symAlloc.alloc(buildPressureSwitchSym())}`);
+        } else if (baseCls === 'WV_3') {
+          extraSymProps.push(
+            ` S dxf_prim_list V ${symAlloc.alloc(
+              buildValveSym('valve_3_2', {
+                leftActuation: { type: 'pneumatic_pilot' },
+                rightActuation: { type: 'spring' },
+              }),
+            )}`,
+          );
+        }
+
         objectBlocks.push(
           [
             `${baseCls} O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4311043`,
             idProp,
             ` S _MCP_TYPE S ${comp.type}`,
             ` S _MCP_PARAMS S ${paramsB64}`,
+            ...extraSymProps,
             ...actLProp,
             ...actRProp,
             ...labelProp,
@@ -2735,7 +2913,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         } else if (baseCls === 'PTriconnection' || baseCls === 'ETriconnection') {
           // Enforce strict 4-gate FluidSIM 4.5 invariant on any junction fallback
           const referencedPorts = new Set<string>();
-          for (const e of document.connections) {
+          for (const e of workingDoc.connections) {
             if (e.from.componentId === comp.id) referencedPorts.add(e.from.port);
             if (e.to.componentId === comp.id) referencedPorts.add(e.to.port);
           }
@@ -2752,7 +2930,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
           }
         } else {
           const referencedPorts = new Set<string>();
-          for (const e of document.connections) {
+          for (const e of workingDoc.connections) {
             if (e.from.componentId === comp.id) referencedPorts.add(e.from.port);
             if (e.to.componentId === comp.id) referencedPorts.add(e.to.port);
           }
@@ -2766,36 +2944,25 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
           }
         }
 
-        // Emit R_SCHALT distance-rule markers for swivel_drive / cylinder_rodless
-        if (comp.distanceRule && comp.distanceRule.length > 0) {
-          const drId = allocObjId();
-          const drLines = [
-            `R_SCHALT O${drId} ${x1 + 10240} ${y1 - 24576} ${x1 + 40960} ${y1 - 12288} 0 0 4253703`,
-            ` S _MCP_OWNER_ID S ${comp.id}`,
-          ];
-          comp.distanceRule.forEach((m, idx) => {
-            drLines.push(` S label${idx} S ${m.label}`);
-            drLines.push(` S pos${idx} F ${m.positionMm}`);
-            drLines.push(` S pos_l_${idx} F ${m.positionMm}`);
-            drLines.push(` S pos_r_${idx} F ${m.positionMm}`);
-          });
-          objectBlocks.push(drLines.join('\n'));
-        }
+        emitDistanceRule(comp);
         break;
       }
     }
   }
 
   // Emit preserved decorative objects (CAD_RECT, text, etc.) if present from an edited native .ct file,
-  // or emit a standard FluidSIM title `text` object carrying sheet metadata for freshly authored .ct circuits.
+  // or emit a standard FluidSIM title `text` object carrying sheet metadata at top-left (y = 4..12 mm).
   const sheetMetaProps: string[] = [
-    ` S _MCP_SHEET_W F ${document.metadata.sheetWidthMm}`,
-    ` S _MCP_SHEET_H F ${document.metadata.sheetHeightMm}`,
-    ...(document.metadata.sheetDomain ? [` S _MCP_SHEET_DOMAIN S ${document.metadata.sheetDomain}`] : []),
-    ...(document.metadata.allowExternalElectricalSheet !== undefined
-      ? [` S _MCP_ALLOW_EXT_ELEC B ${document.metadata.allowExternalElectricalSheet ? 'T' : 'F'}`]
+    ` S _MCP_SHEET_W F ${workingDoc.metadata.sheetWidthMm}`,
+    ` S _MCP_SHEET_H F ${workingDoc.metadata.sheetHeightMm}`,
+    ...(workingDoc.metadata.sheetDomain ? [` S _MCP_SHEET_DOMAIN S ${workingDoc.metadata.sheetDomain}`] : []),
+    ...(workingDoc.metadata.allowExternalElectricalSheet !== undefined
+      ? [` S _MCP_ALLOW_EXT_ELEC B ${workingDoc.metadata.allowExternalElectricalSheet ? 'T' : 'F'}`]
       : []),
   ];
+
+  const titleRect: RawRect = { x1: 18432, y1: 12288, x2: 368640, y2: 36864 };
+  occupiedRects.push(titleRect);
 
   if (hasPreservedCt && preserved.preservedDecorativeObjects.length > 0) {
     let attachedSheetMeta = false;
@@ -2812,26 +2979,76 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       const metaId = allocObjId();
       objectBlocks.push(
         [
-          `text O${metaId} 10240 6144 122880 18432 0 0 1167363`,
-          ` S text S ${(document.metadata.title || 'FluidSIM 4.5 Circuit').replace(/[\r\n]+/g, ' ').trim()}`,
+          `text O${metaId} ${titleRect.x1} ${titleRect.y1} ${titleRect.x2} ${titleRect.y2} 0 0 1167363`,
+          ' S height I 16',
+          ' S font_name S Arial',
+          ` S text S ${(workingDoc.metadata.title || 'FluidSIM 4.5 Circuit').replace(/[\r\n]+/g, ' ').trim()}`,
           ...sheetMetaProps,
         ].join('\n'),
       );
     }
   } else {
     const titleId = allocObjId();
-    const safeTitle = (document.metadata.title || 'FluidSIM 4.5 Circuit').replace(/[\r\n]+/g, ' ').trim();
+    const safeTitle = (workingDoc.metadata.title || 'FluidSIM 4.5 Circuit').replace(/[\r\n]+/g, ' ').trim();
     objectBlocks.push(
       [
-        `text O${titleId} 10240 6144 122880 18432 0 0 1167363`,
+        `text O${titleId} ${titleRect.x1} ${titleRect.y1} ${titleRect.x2} ${titleRect.y2} 0 0 1167363`,
+        ' S height I 16',
+        ' S font_name S Arial',
         ` S text S ${safeTitle}`,
         ...sheetMetaProps,
       ].join('\n'),
     );
   }
 
+  // Emit collision-free visible component label `text` objects (marked with _MCP_LABEL_FOR so reparsing skips them)
+  const rectsOverlap = (a: RawRect, b: RawRect, pad = 1024): boolean =>
+    a.x1 < b.x2 + pad && a.x2 + pad > b.x1 && a.y1 < b.y2 + pad && a.y2 + pad > b.y1;
+
+  for (const cand of labelCandidates) {
+    const safeLabel = cand.label.replace(/[\r\n]+/g, ' ').trim();
+    if (!safeLabel) continue;
+    const lblW = Math.max(14336, Math.min(49152, safeLabel.length * 4096 + 4096));
+    const lblH = 10240;
+    const midY = cand.y1 + Math.round((cand.y2 - cand.y1 - lblH) / 2);
+    const midX = cand.x1 + Math.round((cand.x2 - cand.x1 - lblW) / 2);
+    const gap = 3072;
+
+    const trials: Array<{ x1: number; y1: number }> = [
+      { x1: cand.x2 + gap, y1: midY }, // Right
+      { x1: cand.x1 - lblW - gap, y1: midY }, // Left
+      { x1: midX, y1: cand.y2 + gap }, // Below
+      { x1: midX, y1: cand.y1 - lblH - gap }, // Above
+      { x1: cand.x2 + gap, y1: cand.y1 }, // Top-right
+      { x1: cand.x1 - lblW - gap, y1: cand.y1 }, // Top-left
+      { x1: cand.x2 + gap, y1: cand.y2 - lblH }, // Bottom-right
+      { x1: cand.x1 - lblW - gap, y1: cand.y2 - lblH }, // Bottom-left
+      { x1: cand.x2 + gap * 3, y1: midY }, // Far right
+      { x1: midX, y1: cand.y2 + gap * 3 }, // Far below
+    ];
+
+    for (const t of trials) {
+      const r: RawRect = { x1: t.x1, y1: t.y1, x2: t.x1 + lblW, y2: t.y1 + lblH };
+      if (r.x1 < 4096 || r.y1 < titleRect.y2 + 20 * 1024) continue;
+      if (!occupiedRects.some((occ) => rectsOverlap(r, occ, 1024))) {
+        occupiedRects.push(r);
+        const lblId = allocObjId();
+        objectBlocks.push(
+          [
+            `text O${lblId} ${r.x1} ${r.y1} ${r.x2} ${r.y2} 0 0 1167363`,
+            ' S height I 10',
+            ' S font_name S Arial',
+            ` S text S ${safeLabel}`,
+            ` S _MCP_LABEL_FOR S ${cand.compId}`,
+          ].join('\n'),
+        );
+        break;
+      }
+    }
+  }
+
   // Emit CON PLine / CON ELine edges (with orthogonal L polyline segments when routed)
-  for (const edge of document.connections) {
+  for (const edge of workingDoc.connections) {
     if (embeddedTerminatorEdgeIds.has(edge.id)) continue;
     const pA = portObjIdMap.get(`${edge.from.componentId}:${edge.from.port}`);
     const pB = portObjIdMap.get(`${edge.to.componentId}:${edge.to.port}`);
@@ -2852,6 +3069,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
   }
 
   const ctBody = [...objectBlocks, '0 0 0 # 0 0 0 0 0 0', ...gateLines, ...connectionBlocks].join('\n');
+  const trailerText = symAlloc.renderTrailer();
 
   return {
     ...(hasPreservedCt
@@ -2860,10 +3078,10 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
           profile: preserved.profile,
           previewBlockB64: preserved.previewBlockB64,
           ...(preserved.fsPreviewBlock !== undefined ? { fsPreviewBlock: preserved.fsPreviewBlock } : {}),
-          trailerText: preserved.trailerText,
         }
       : {}),
     ctBody,
+    trailerText,
   };
 }
 
@@ -2895,6 +3113,145 @@ export function verifyCtTextInvariants(ctBody: string): CtTextInvariantReport {
   return {
     ok: badJunctions.length === 0,
     badJunctions,
+  };
+}
+
+export interface CtVisualLayoutInvariantReport {
+  ok: boolean;
+  symCount: number;
+  missingSymbols: Array<{ cls: string; objId: number; prop: string; symIdx: number }>;
+  missingDxfPrimList: Array<{ cls: string; objId: number }>;
+  negativeCoordObjects: Array<{ cls: string; objId: number; x1: number; y1: number }>;
+  titleCollisions: Array<{ cls: string; objId: number; y1: number; titleY2: number }>;
+  overlaps: Array<{ a: string; b: string }>;
+}
+
+const DXF_SYMBOL_REQUIRED_CLASSES = new Set([
+  'CylDGPPAB',
+  'WV_2',
+  'WV_3',
+  'WV_4',
+  'WV_5',
+  'DRSV2_pneu',
+  'FilterP',
+  'CheckValveP',
+  'CheckValveSpringLoadedP',
+  'CheckValvePilotOperatedSpringLoadedP',
+  'Wartungseinheit2',
+  'PAR1b',
+  'PAV1',
+  'PAV1S',
+  'PSW1',
+]);
+
+/**
+ * Verifies FluidSIM 4.5 visual rendering & raw-AST layout invariants on a decoded `.ct` file:
+ * 1. Every `S dxf_prim_list V <n>` / `dxf_prim_list2 V <n>` references an existing `SYM <n>` in `BEGINSYM..ENDSYM`.
+ * 2. Every symbol-rendered component class (`CylDGPPAB`, `WV_*`, `DRSV2_pneu`, `FilterP`, `CheckValve*`, `Wartungseinheit2`, etc.) emits `dxf_prim_list`.
+ * 3. Every non-port object has strictly positive coordinates (`x1 > 0 && y1 > 0`).
+ * 4. Every component, `R_SCHALT`, and component label sits `>= 20 * 1024` below the title `text` object's `y2`.
+ * 5. Zero overlapping pairs among all non-port objects (components, `R_SCHALT`, `text`) in raw FluidSIM coordinates.
+ */
+export function verifyCtVisualLayoutInvariants(
+  ctBody: string,
+  trailerText: string,
+): CtVisualLayoutInvariantReport {
+  const ast = parseCtBodyAst(ctBody);
+
+  // Parse defined SYM <n> blocks inside BEGINSYM ... ENDSYM
+  const symIds = new Set<number>();
+  let inSymSection = false;
+  for (const rawLine of trailerText.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === 'BEGINSYM') {
+      inSymSection = true;
+      continue;
+    }
+    if (line === 'ENDSYM') {
+      inSymSection = false;
+      continue;
+    }
+    if (inSymSection) {
+      const m = line.match(/^SYM\s+(\d+)$/);
+      if (m) symIds.add(Number(m[1]));
+    }
+  }
+
+  const missingSymbols: CtVisualLayoutInvariantReport['missingSymbols'] = [];
+  const missingDxfPrimList: CtVisualLayoutInvariantReport['missingDxfPrimList'] = [];
+  const negativeCoordObjects: CtVisualLayoutInvariantReport['negativeCoordObjects'] = [];
+  const titleCollisions: CtVisualLayoutInvariantReport['titleCollisions'] = [];
+  const overlaps: CtVisualLayoutInvariantReport['overlaps'] = [];
+
+  const nonPortObjs: RawCtObject[] = [];
+  let titleObj: RawCtObject | undefined;
+
+  for (const obj of ast.objects) {
+    if (PORT_CLASSES.has(obj.cls)) continue;
+    nonPortObjs.push(obj);
+
+    if (obj.x1 <= 0 || obj.y1 <= 0) {
+      negativeCoordObjects.push({ cls: obj.cls, objId: obj.objId, x1: obj.x1, y1: obj.y1 });
+    }
+
+    if (obj.cls === 'text' && !getScalarProp(obj.props, '_MCP_LABEL_FOR') && !titleObj) {
+      titleObj = obj;
+    }
+
+    const dxf1 = getScalarProp(obj.props, 'dxf_prim_list');
+    const dxf2 = getScalarProp(obj.props, 'dxf_prim_list2');
+    if (DXF_SYMBOL_REQUIRED_CLASSES.has(obj.cls) && dxf1 === undefined) {
+      missingDxfPrimList.push({ cls: obj.cls, objId: obj.objId });
+    }
+    if (dxf1 !== undefined) {
+      const idx = Number(dxf1);
+      if (!Number.isInteger(idx) || !symIds.has(idx)) {
+        missingSymbols.push({ cls: obj.cls, objId: obj.objId, prop: 'dxf_prim_list', symIdx: idx });
+      }
+    }
+    if (dxf2 !== undefined) {
+      const idx = Number(dxf2);
+      if (!Number.isInteger(idx) || !symIds.has(idx)) {
+        missingSymbols.push({ cls: obj.cls, objId: obj.objId, prop: 'dxf_prim_list2', symIdx: idx });
+      }
+    }
+  }
+
+  if (titleObj) {
+    const minAllowedY = titleObj.y2 + 20 * 1024;
+    for (const obj of nonPortObjs) {
+      if (obj === titleObj) continue;
+      if (obj.y1 < minAllowedY) {
+        titleCollisions.push({ cls: obj.cls, objId: obj.objId, y1: obj.y1, titleY2: titleObj.y2 });
+      }
+    }
+  }
+
+  for (let i = 0; i < nonPortObjs.length; i++) {
+    const a = nonPortObjs[i];
+    for (let j = i + 1; j < nonPortObjs.length; j++) {
+      const b = nonPortObjs[j];
+      const ox = a.x1 < b.x2 && a.x2 > b.x1;
+      const oy = a.y1 < b.y2 && a.y2 > b.y1;
+      if (ox && oy) {
+        overlaps.push({ a: `${a.cls}#O${a.objId}`, b: `${b.cls}#O${b.objId}` });
+      }
+    }
+  }
+
+  return {
+    ok:
+      missingSymbols.length === 0 &&
+      missingDxfPrimList.length === 0 &&
+      negativeCoordObjects.length === 0 &&
+      titleCollisions.length === 0 &&
+      overlaps.length === 0,
+    symCount: symIds.size,
+    missingSymbols,
+    missingDxfPrimList,
+    negativeCoordObjects,
+    titleCollisions,
+    overlaps,
   };
 }
 

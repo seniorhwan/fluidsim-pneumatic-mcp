@@ -47,11 +47,23 @@ export interface DecodedCtContainer {
   decompressedByteLength: number;
 }
 
-// Default minimal FluidSIM 4.5 obfuscated header lines (A4 sheet) derived from verified golden fixtures.
+// Default minimal FluidSIM 4.5 obfuscated header lines (DIN A4 sheet) derived from verified golden 01.ct.
 const DEFAULT_CT_HEADER_LINES_HEX: readonly string[] = [
   '3e6c75423f56daaf205628b0c36c08bbb4654292342034e337e34a2cd94f204ad92b347a2b2cd9',
   '8282',
   'b3c2ce2082494d09201c49b8a82082f61c1c1c1c1c1c2082',
+  '092049201c20a7',
+  '1c201c2057821c205749a72082',
+  '1c',
+  '1c',
+  '50c2e8b3557fcece',
+];
+
+// Default FluidSIM 4.5 DIN A3 header lines derived from verified golden 02..05.ct (H2 configures A3 sheet width).
+const DEFAULT_CT_A3_HEADER_LINES_HEX: readonly string[] = [
+  '3e6c75423f56daaf205628b0c36c08bbb4654292342034e337e34a2cd94f204ad92b347a2b2cd9',
+  '8282',
+  'b3c2ce2082caa8ca201c49a8822082f61c1c1c1c1c1c2082',
   '092049201c20a7',
   '1c201c2057821c205749a72082',
   '1c',
@@ -703,11 +715,14 @@ export function encodeCtContainer(container: {
   fsPreviewBlock?: string;
   ctBody: string;
   trailerText?: string;
+  sheetWidthMm?: number;
 }): Buffer {
+  const defaultHexLines =
+    (container.sheetWidthMm ?? 297) > 300 ? DEFAULT_CT_A3_HEADER_LINES_HEX : DEFAULT_CT_HEADER_LINES_HEX;
   const headerLines =
     container.headerLinesB64 && container.headerLinesB64.length > 0
       ? container.headerLinesB64.map((b64) => Buffer.from(b64, 'base64'))
-      : DEFAULT_CT_HEADER_LINES_HEX.map((hex) => Buffer.from(hex, 'hex'));
+      : defaultHexLines.map((hex) => Buffer.from(hex, 'hex'));
 
   const previewBlock =
     container.previewBlockB64 && container.previewBlockB64.length > 0

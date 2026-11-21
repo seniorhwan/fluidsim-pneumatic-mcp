@@ -22,7 +22,10 @@ export function serializeCircuitDocument(
 
   if (targetFormat === 'fluidsim-4.5-ct') {
     const container = serializeDocumentToCtContainer(document);
-    return encodeCtContainer(container);
+    return encodeCtContainer({
+      ...container,
+      sheetWidthMm: document.metadata.sheetWidthMm,
+    });
   }
 
   const canonical: CircuitDocument = {

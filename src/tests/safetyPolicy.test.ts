@@ -42,6 +42,9 @@ test('WorkspaceGuard blocks path traversal, absolute escapes, and disallowed ext
 
     const resolved = guard.resolveCircuitPath('sub/circuit.fsim.json');
     assert.ok(resolved.startsWith(tmpDir));
+
+    // Resolving workspace root itself (used by project_create default projectDir=".") must succeed
+    assert.equal(guard.resolveProjectDir('.'), guard.root);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

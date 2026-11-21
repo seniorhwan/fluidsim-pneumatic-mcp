@@ -9,7 +9,7 @@ import { serializeCircuitDocument } from '../codec/ctSerializer';
 import { parseCircuitBuffer } from '../codec/ctParser';
 import { verifyCodecRoundtrip } from '../codec/ctRoundtripGuard';
 import { decodeCtContainer, verifyCtPayloadLinearBounds } from '../codec/ctBinaryCodec';
-import { verifyCtTextInvariants } from '../codec/ctTextCodec';
+import { verifyCtTextInvariants, verifyCtVisualLayoutInvariants } from '../codec/ctTextCodec';
 
 function buildFestoDistributionStationCircuit(): CircuitDocument {
   const now = new Date().toISOString();
@@ -266,6 +266,23 @@ test('Festo MPS-C Distributing Station passes static validation (0 errors, 0 war
     }
   }
 
+  // 2b. Connected-branch ISO 1219 pneumatic layout assertions:
+  // Branches ordered left-to-right (-1A1 < -2A1 < -3A1) and vacuum junctions above -2M1 valve row
+  const cyl1A1 = doc.components.find((c) => c.id === 'CYL_1A1')!;
+  const cup2A1 = doc.components.find((c) => c.id === 'CUP_2A1')!;
+  const swivel3A1 = doc.components.find((c) => c.id === 'SWIVEL_3A1')!;
+  const jVac1 = doc.components.find((c) => c.id === 'J_VAC_1')!;
+  const jVac2 = doc.components.find((c) => c.id === 'J_VAC_2')!;
+  const v2M1 = doc.components.find((c) => c.id === 'V_2M1')!;
+  assert.ok(
+    cyl1A1.layout!.x < cup2A1.layout!.x && cup2A1.layout!.x < swivel3A1.layout!.x,
+    `Expected left-to-right actuator columns (-1A1 < -2A1 < -3A1), got x=${cyl1A1.layout!.x}, ${cup2A1.layout!.x}, ${swivel3A1.layout!.x}`,
+  );
+  assert.ok(
+    jVac1.layout!.y < v2M1.layout!.y && jVac2.layout!.y < v2M1.layout!.y,
+    `Expected vacuum branch junctions above V_2M1 (y=${v2M1.layout!.y}), got J_VAC_1=${jVac1.layout!.y}, J_VAC_2=${jVac2.layout!.y}`,
+  );
+
   // 3. Native FluidSIM 4.5 .ct roundtrip preserves all metadata, rotations, composite actuation, and normallyOpen
   const ctBytes = serializeCircuitDocument(doc, { targetPath: 'distribution_station.ct' });
   const lzBounds = verifyCtPayloadLinearBounds(ctBytes, 'distribution_station.ct');
@@ -276,7 +293,22 @@ test('Festo MPS-C Distributing Station passes static validation (0 errors, 0 war
   const decoded = decodeCtContainer(ctBytes, 'distribution_station.ct');
   const inv = verifyCtTextInvariants(decoded.ctBody);
   assert.equal(inv.ok, true, `PTriconnection/ETriconnection 4-gate invariant failed: ${JSON.stringify(inv.badJunctions)}`);
+
+  const visualInv = verifyCtVisualLayoutInvariants(decoded.ctBody, decoded.trailerText);
+  assert.equal(
+    visualInv.ok,
+    true,
+    `Visual/BEGINSYM layout invariant failed: ${JSON.stringify(visualInv)}`,
+  );
+  assert.ok(visualInv.symCount >= 10, `Expected >= 10 BEGINSYM entries, got ${visualInv.symCount}`);
+  assert.equal(visualInv.missingSymbols.length, 0);
+  assert.equal(visualInv.missingDxfPrimList.length, 0);
+  assert.equal(visualInv.negativeCoordObjects.length, 0);
+  assert.equal(visualInv.titleCollisions.length, 0);
+  assert.equal(visualInv.overlaps.length, 0);
+
   for (const cls of [
+    'Wartungseinheit2 ',
     'PAV1S ',
     'PAV1 ',
     'PAR1b ',
@@ -286,11 +318,62 @@ test('Festo MPS-C Distributing Station passes static validation (0 errors, 0 war
     'WV_2 ',
     'WV_3 ',
     'WV_5 ',
-    'PEW ',
+    'PSW1 ',
   ]) {
     assert.ok(decoded.ctBody.includes(cls), `Expected genuine FluidSIM 4.5 class "${cls.trim()}" in distribution_station.ct`);
   }
   assert.ok(decoded.ctBody.includes('SWITCHED_POS_R S (2\tC3P)'), 'Expected native FluidSIM 4.5 NO WV_3 SWITCHED_POS_R');
+
+  // Verify exhaust silencers (EX_MAIN, EX_2V1) are embedded as EX3 on their parent ports, never emitted as PSW1
+  const psw1Matches = decoded.ctBody.match(/^PSW1 /gm) ?? [];
+  assert.equal(psw1Matches.length, 1, `Expected exactly 1 PSW1 (PSW_2B1), found ${psw1Matches.length}`);
+  assert.ok(decoded.ctBody.includes('_MCP_EXH_ID S EX_MAIN'), 'Expected EX_MAIN embedded on parent port');
+  assert.ok(decoded.ctBody.includes('_MCP_EXH_ID S EX_2V1'), 'Expected EX_2V1 embedded on parent port');
+  assert.ok(decoded.ctBody.includes('ex_type S EX3'), 'Expected EX3 exhaust silencer port attribute');
+
+  // Verify UEConnection solenoid hitboxes sit near the valve ends (left/right), NOT centered in the middle of the valve body
+  const ctLines = decoded.ctBody.split('\n');
+  const valveRectById = new Map<number, { x1: number; y1: number; x2: number; y2: number }>();
+  const ueRectById = new Map<number, { x1: number; y1: number; x2: number; y2: number }>();
+  for (const ln of ctLines) {
+    const mValve = ln.match(/^WV_(2|3|4|5)\s+O(\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)/);
+    if (mValve) {
+      valveRectById.set(Number(mValve[2]), {
+        x1: Number(mValve[3]),
+        y1: Number(mValve[4]),
+        x2: Number(mValve[5]),
+        y2: Number(mValve[6]),
+      });
+      continue;
+    }
+    const mUe = ln.match(/^UEConnection\s+O(\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)/);
+    if (mUe) {
+      ueRectById.set(Number(mUe[1]), {
+        x1: Number(mUe[2]),
+        y1: Number(mUe[3]),
+        x2: Number(mUe[4]),
+        y2: Number(mUe[5]),
+      });
+    }
+  }
+  let checkedSolenoidBoxes = 0;
+  for (const ln of ctLines) {
+    const mGate = ln.match(/^gate\d+\s+#\s+(\d+)\s+(\d+)$/);
+    if (!mGate) continue;
+    const valve = valveRectById.get(Number(mGate[1]));
+    const ue = ueRectById.get(Number(mGate[2]));
+    if (valve && ue) {
+      const vMid = (valve.x1 + valve.x2) / 2;
+      const uxCenter = (ue.x1 + ue.x2) / 2;
+      const distFromMid = Math.abs(uxCenter - vMid);
+      assert.ok(
+        distFromMid > (valve.x2 - valve.x1) * 0.25,
+        `Expected UEConnection near valve end (vx1=${valve.x1}, vx2=${valve.x2}), got center=${uxCenter}`,
+      );
+      checkedSolenoidBoxes++;
+    }
+  }
+  assert.ok(checkedSolenoidBoxes >= 10, `Expected >= 10 valve UEConnection boxes checked, got ${checkedSolenoidBoxes}`);
 
   const rt = verifyCodecRoundtrip(doc, ctBytes, 'distribution_station.ct');
   assert.equal(rt.passed, true);

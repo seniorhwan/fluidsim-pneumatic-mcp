@@ -169,12 +169,12 @@ export class WorkspaceGuard {
       });
     }
 
-    // Check symlink escape on parent directory AND on the target file itself (if it exists)
+    // Check symlink escape on parent directory (when candidate is inside root) AND on the target itself (if it exists)
     const parentDir = path.dirname(candidate);
     if (fs.existsSync(this.root)) {
       const realRoot = fs.realpathSync(this.root);
       const realRootPrefix = realRoot.endsWith(path.sep) ? realRoot : `${realRoot}${path.sep}`;
-      if (fs.existsSync(parentDir)) {
+      if (candidate !== this.root && fs.existsSync(parentDir)) {
         const realParent = fs.realpathSync(parentDir);
         if (realParent !== realRoot && !realParent.startsWith(realRootPrefix)) {
           throw new EngineeringError({

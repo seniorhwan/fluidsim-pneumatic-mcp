@@ -13,7 +13,7 @@ import {
   encodeCtContainer,
   verifyCtPayloadLinearBounds,
 } from '../codec/ctBinaryCodec';
-import { verifyCtTextInvariants, type PreservedCtSections } from '../codec/ctTextCodec';
+import { verifyCtTextInvariants, verifyCtVisualLayoutInvariants, type PreservedCtSections } from '../codec/ctTextCodec';
 import type { CircuitDocument } from '../contracts/circuit';
 import { EngineeringError } from '../contracts/errors';
 import { generateCircuitFromSpec } from '../authoring/specGenerator';
@@ -142,6 +142,9 @@ test('freshly authored native .ct circuit roundtrips, patches losslessly, valida
   const abbaDecoded = decodeCtContainer(ctBytes, 'abba_generated.ct');
   const abbaInv = verifyCtTextInvariants(abbaDecoded.ctBody);
   assert.equal(abbaInv.ok, true, `4-gate junction invariant failed: ${JSON.stringify(abbaInv.badJunctions)}`);
+  const abbaVis = verifyCtVisualLayoutInvariants(abbaDecoded.ctBody, abbaDecoded.trailerText);
+  assert.equal(abbaVis.ok, true, `Visual/BEGINSYM invariant failed on abba_generated.ct: ${JSON.stringify(abbaVis)}`);
+  assert.ok(abbaVis.symCount >= 4, `Expected >= 4 BEGINSYM entries on abba_generated.ct, got ${abbaVis.symCount}`);
   const rt = verifyCodecRoundtrip(doc, ctBytes, 'abba_generated.ct');
   assert.equal(rt.passed, true);
 
@@ -442,11 +445,13 @@ test('newly verified FluidSIM 4.5 classes (WV_2, WV_4, FilterP, CheckValveP, PEW
   const decoded = decodeCtContainer(ctBytes, 'verified_classes.ct');
   const vInv = verifyCtTextInvariants(decoded.ctBody);
   assert.equal(vInv.ok, true, `4-gate invariant failed: ${JSON.stringify(vInv.badJunctions)}`);
+  const vVis = verifyCtVisualLayoutInvariants(decoded.ctBody, decoded.trailerText);
+  assert.equal(vVis.ok, true, `Visual/BEGINSYM invariant failed on verified_classes.ct: ${JSON.stringify(vVis)}`);
   assert.ok(decoded.ctBody.includes('WV_2 '));
   assert.ok(decoded.ctBody.includes('FilterP '));
   assert.ok(decoded.ctBody.includes('CheckValveP '));
   assert.ok(decoded.ctBody.includes('CheckValveSpringLoadedP '));
-  assert.ok(decoded.ctBody.includes('PEW '));
+  assert.ok(decoded.ctBody.includes('PSW1 '));
   assert.ok(decoded.ctBody.includes('PressureReducingValve3WaysAdjustableP '));
   assert.ok(decoded.ctBody.includes('LWechsler '));
   assert.ok(decoded.ctBody.includes('LRelaismagnet_abfver '));
