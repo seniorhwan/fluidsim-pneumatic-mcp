@@ -1,0 +1,1855 @@
+{
+  "schemaVersion": "1.0",
+  "metadata": {
+    "title": "MPS-C Distributing Station (Attempt)",
+    "fluidsimVersion": "4.5",
+    "format": "fsim-ir-json",
+    "sheetWidthMm": 760,
+    "sheetHeightMm": 230,
+    "createdAt": "2026-11-21T10:07:18.324Z",
+    "updatedAt": "2026-11-21T10:07:18.340Z"
+  },
+  "components": [
+    {
+      "id": "SRC_1",
+      "type": "air_source",
+      "label": "1",
+      "params": {
+        "pressureBar": 6,
+        "maxFlowLMin": 1000
+      },
+      "layout": {
+        "x": 115,
+        "y": 190,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "J_BUS1",
+      "type": "pneumatic_junction",
+      "params": {},
+      "layout": {
+        "x": 115,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "J_BUS2",
+      "type": "pneumatic_junction",
+      "params": {},
+      "layout": {
+        "x": 350,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "J_BUS3",
+      "type": "pneumatic_junction",
+      "params": {},
+      "layout": {
+        "x": 375,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "J_BUS4",
+      "type": "pneumatic_junction",
+      "params": {},
+      "layout": {
+        "x": 400,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "SIL_MAIN",
+      "type": "exhaust_silencer",
+      "label": "3/5",
+      "params": {},
+      "layout": {
+        "x": 500,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "J_EX1",
+      "type": "pneumatic_junction",
+      "params": {},
+      "layout": {
+        "x": 140,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "J_EX2",
+      "type": "pneumatic_junction",
+      "params": {},
+      "layout": {
+        "x": 165,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "J_EX3",
+      "type": "pneumatic_junction",
+      "params": {},
+      "layout": {
+        "x": 425,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "J_EX4",
+      "type": "pneumatic_junction",
+      "params": {},
+      "layout": {
+        "x": 450,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "J_EX5",
+      "type": "pneumatic_junction",
+      "params": {},
+      "layout": {
+        "x": 475,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "V_1V1",
+      "type": "valve_5_2",
+      "label": "-1V1",
+      "params": {
+        "initialState": "right",
+        "nominalFlowLMin": 500
+      },
+      "leftActuation": {
+        "type": "solenoid",
+        "label": "1M1"
+      },
+      "rightActuation": {
+        "type": "spring"
+      },
+      "layout": {
+        "x": 105,
+        "y": 100,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "FC_1V2",
+      "type": "flow_control_one_way",
+      "label": "-1V2",
+      "params": {
+        "openingPct": 50,
+        "freeFlowDirection": "1_to_2"
+      },
+      "layout": {
+        "x": 95,
+        "y": 60,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "FC_1V3",
+      "type": "flow_control_one_way",
+      "label": "-1V3",
+      "params": {
+        "openingPct": 50,
+        "freeFlowDirection": "1_to_2"
+      },
+      "layout": {
+        "x": 130,
+        "y": 60,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "CYL_1A1",
+      "type": "cylinder_double_acting",
+      "label": "-1A1",
+      "params": {
+        "strokeMm": 80,
+        "pistonDiameterMm": 25,
+        "rodDiameterMm": 10,
+        "externalLoadN": 0,
+        "cushioning": true,
+        "initialPositionMm": 0
+      },
+      "distanceRule": [
+        {
+          "label": "1B1",
+          "positionMm": 2
+        },
+        {
+          "label": "1B2",
+          "positionMm": 78
+        }
+      ],
+      "layout": {
+        "x": 80,
+        "y": 20,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "V_2M1",
+      "type": "valve_3_2",
+      "label": "-2M1",
+      "params": {
+        "normalState": "NC",
+        "nominalFlowLMin": 120
+      },
+      "leftActuation": {
+        "type": "solenoid",
+        "label": "2M1"
+      },
+      "rightActuation": {
+        "type": "spring"
+      },
+      "layout": {
+        "x": 525,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "V_2M2",
+      "type": "valve_3_2",
+      "label": "-2M2",
+      "params": {
+        "normalState": "NC",
+        "nominalFlowLMin": 120
+      },
+      "leftActuation": {
+        "type": "solenoid",
+        "label": "2M2"
+      },
+      "rightActuation": {
+        "type": "spring"
+      },
+      "layout": {
+        "x": 305,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "FC_2V3",
+      "type": "flow_control_one_way",
+      "label": "-2V3",
+      "params": {
+        "openingPct": 50,
+        "freeFlowDirection": "1_to_2"
+      },
+      "layout": {
+        "x": 235,
+        "y": 60,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "J_VAC",
+      "type": "pneumatic_junction",
+      "params": {},
+      "layout": {
+        "x": 190,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "ACT_2A1",
+      "type": "cylinder_single_acting",
+      "label": "-2A1_SUB",
+      "params": {
+        "strokeMm": 20,
+        "pistonDiameterMm": 20,
+        "springForceN": 25,
+        "externalLoadN": 0,
+        "initialPositionMm": 0
+      },
+      "layout": {
+        "x": 20,
+        "y": 20,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "V_3M1",
+      "type": "valve_3_2",
+      "label": "-3M1",
+      "params": {
+        "normalState": "NC",
+        "nominalFlowLMin": 120
+      },
+      "leftActuation": {
+        "type": "solenoid",
+        "label": "3M1"
+      },
+      "rightActuation": {
+        "type": "spring"
+      },
+      "layout": {
+        "x": 215,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "V_3M2",
+      "type": "valve_3_2",
+      "label": "-3M2",
+      "params": {
+        "normalState": "NC",
+        "nominalFlowLMin": 120
+      },
+      "leftActuation": {
+        "type": "solenoid",
+        "label": "3M2"
+      },
+      "rightActuation": {
+        "type": "spring"
+      },
+      "layout": {
+        "x": 260,
+        "y": 145,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "FC_3V2",
+      "type": "flow_control_one_way",
+      "label": "-3V2",
+      "params": {
+        "openingPct": 50,
+        "freeFlowDirection": "1_to_2"
+      },
+      "layout": {
+        "x": 165,
+        "y": 60,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "FC_3V3",
+      "type": "flow_control_one_way",
+      "label": "-3V3",
+      "params": {
+        "openingPct": 50,
+        "freeFlowDirection": "1_to_2"
+      },
+      "layout": {
+        "x": 200,
+        "y": 60,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "CYL_3A1",
+      "type": "cylinder_double_acting",
+      "label": "-3A1_SUB",
+      "params": {
+        "strokeMm": 180,
+        "pistonDiameterMm": 25,
+        "rodDiameterMm": 10,
+        "externalLoadN": 0,
+        "cushioning": true,
+        "initialPositionMm": 0
+      },
+      "distanceRule": [
+        {
+          "label": "3S1",
+          "positionMm": 2
+        },
+        {
+          "label": "3S2",
+          "positionMm": 178
+        }
+      ],
+      "layout": {
+        "x": 145,
+        "y": 20,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "PWR_24",
+      "type": "power_24v",
+      "label": "+24V",
+      "params": {
+        "voltageV": 24
+      },
+      "layout": {
+        "x": 600,
+        "y": 20,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "PWR_0",
+      "type": "power_0v",
+      "label": "0V",
+      "params": {},
+      "layout": {
+        "x": 600,
+        "y": 185,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "PB_1M1",
+      "type": "pushbutton_no",
+      "label": "S_1M1",
+      "params": {
+        "detent": true
+      },
+      "layout": {
+        "x": 600,
+        "y": 55,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "SOL_1M1",
+      "type": "valve_solenoid",
+      "label": "1M1",
+      "params": {},
+      "layout": {
+        "x": 600,
+        "y": 140,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "PB_2M1",
+      "type": "pushbutton_no",
+      "label": "S_2M1",
+      "params": {
+        "detent": true
+      },
+      "layout": {
+        "x": 625,
+        "y": 55,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "SOL_2M1",
+      "type": "valve_solenoid",
+      "label": "2M1",
+      "params": {},
+      "layout": {
+        "x": 630,
+        "y": 140,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "PB_2M2",
+      "type": "pushbutton_no",
+      "label": "S_2M2",
+      "params": {
+        "detent": true
+      },
+      "layout": {
+        "x": 650,
+        "y": 55,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "SOL_2M2",
+      "type": "valve_solenoid",
+      "label": "2M2",
+      "params": {},
+      "layout": {
+        "x": 660,
+        "y": 140,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "PB_3M1",
+      "type": "pushbutton_no",
+      "label": "S_3M1",
+      "params": {
+        "detent": true
+      },
+      "layout": {
+        "x": 675,
+        "y": 55,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "SOL_3M1",
+      "type": "valve_solenoid",
+      "label": "3M1",
+      "params": {},
+      "layout": {
+        "x": 690,
+        "y": 140,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "PB_3M2",
+      "type": "pushbutton_no",
+      "label": "S_3M2",
+      "params": {
+        "detent": true
+      },
+      "layout": {
+        "x": 700,
+        "y": 55,
+        "rotationDeg": 0
+      }
+    },
+    {
+      "id": "SOL_3M2",
+      "type": "valve_solenoid",
+      "label": "3M2",
+      "params": {},
+      "layout": {
+        "x": 720,
+        "y": 140,
+        "rotationDeg": 0
+      }
+    }
+  ],
+  "connections": [
+    {
+      "id": "E1",
+      "from": {
+        "componentId": "SRC_1",
+        "port": "1"
+      },
+      "to": {
+        "componentId": "J_BUS1",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 120,
+          "y": 190
+        },
+        {
+          "x": 120,
+          "y": 170
+        },
+        {
+          "x": 115,
+          "y": 170
+        },
+        {
+          "x": 115,
+          "y": 150
+        }
+      ]
+    },
+    {
+      "id": "E2",
+      "from": {
+        "componentId": "J_BUS1",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "J_BUS2",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 125,
+          "y": 150
+        },
+        {
+          "x": 350,
+          "y": 150
+        }
+      ]
+    },
+    {
+      "id": "E3",
+      "from": {
+        "componentId": "J_BUS2",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "J_BUS3",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 360,
+          "y": 150
+        },
+        {
+          "x": 375,
+          "y": 150
+        }
+      ]
+    },
+    {
+      "id": "E4",
+      "from": {
+        "componentId": "J_BUS3",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "J_BUS4",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 385,
+          "y": 150
+        },
+        {
+          "x": 400,
+          "y": 150
+        }
+      ]
+    },
+    {
+      "id": "E5",
+      "from": {
+        "componentId": "J_EX1",
+        "port": "1"
+      },
+      "to": {
+        "componentId": "SIL_MAIN",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 140,
+          "y": 150
+        },
+        {
+          "x": 140,
+          "y": 140
+        },
+        {
+          "x": 505,
+          "y": 140
+        },
+        {
+          "x": 505,
+          "y": 145
+        }
+      ]
+    },
+    {
+      "id": "E6",
+      "from": {
+        "componentId": "J_EX2",
+        "port": "1"
+      },
+      "to": {
+        "componentId": "J_EX1",
+        "port": "2"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 165,
+          "y": 150
+        },
+        {
+          "x": 150,
+          "y": 150
+        }
+      ]
+    },
+    {
+      "id": "E7",
+      "from": {
+        "componentId": "J_EX3",
+        "port": "1"
+      },
+      "to": {
+        "componentId": "J_EX2",
+        "port": "2"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 425,
+          "y": 150
+        },
+        {
+          "x": 175,
+          "y": 150
+        }
+      ]
+    },
+    {
+      "id": "E8",
+      "from": {
+        "componentId": "J_EX4",
+        "port": "1"
+      },
+      "to": {
+        "componentId": "J_EX3",
+        "port": "2"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 450,
+          "y": 150
+        },
+        {
+          "x": 435,
+          "y": 150
+        }
+      ]
+    },
+    {
+      "id": "E9",
+      "from": {
+        "componentId": "J_EX5",
+        "port": "1"
+      },
+      "to": {
+        "componentId": "J_EX4",
+        "port": "2"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 475,
+          "y": 150
+        },
+        {
+          "x": 460,
+          "y": 150
+        }
+      ]
+    },
+    {
+      "id": "E10",
+      "from": {
+        "componentId": "J_BUS1",
+        "port": "3"
+      },
+      "to": {
+        "componentId": "V_1V1",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 120,
+          "y": 145
+        },
+        {
+          "x": 120,
+          "y": 115
+        }
+      ]
+    },
+    {
+      "id": "E11",
+      "from": {
+        "componentId": "V_1V1",
+        "port": "3"
+      },
+      "to": {
+        "componentId": "J_EX1",
+        "port": "3"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 130,
+          "y": 115
+        },
+        {
+          "x": 130,
+          "y": 135
+        },
+        {
+          "x": 145,
+          "y": 135
+        },
+        {
+          "x": 145,
+          "y": 145
+        }
+      ]
+    },
+    {
+      "id": "E12",
+      "from": {
+        "componentId": "V_1V1",
+        "port": "5"
+      },
+      "to": {
+        "componentId": "J_EX2",
+        "port": "3"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 115,
+          "y": 115
+        },
+        {
+          "x": 115,
+          "y": 125
+        },
+        {
+          "x": 170,
+          "y": 125
+        },
+        {
+          "x": 170,
+          "y": 145
+        }
+      ]
+    },
+    {
+      "id": "E13",
+      "from": {
+        "componentId": "V_1V1",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "FC_1V2",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 125,
+          "y": 100
+        },
+        {
+          "x": 125,
+          "y": 90
+        },
+        {
+          "x": 105,
+          "y": 90
+        },
+        {
+          "x": 105,
+          "y": 75
+        }
+      ]
+    },
+    {
+      "id": "E14",
+      "from": {
+        "componentId": "FC_1V2",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "CYL_1A1",
+        "port": "A"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 105,
+          "y": 60
+        },
+        {
+          "x": 105,
+          "y": 55
+        },
+        {
+          "x": 85,
+          "y": 55
+        },
+        {
+          "x": 85,
+          "y": 40
+        }
+      ]
+    },
+    {
+      "id": "E15",
+      "from": {
+        "componentId": "V_1V1",
+        "port": "4"
+      },
+      "to": {
+        "componentId": "FC_1V3",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 115,
+          "y": 100
+        },
+        {
+          "x": 115,
+          "y": 85
+        },
+        {
+          "x": 140,
+          "y": 85
+        },
+        {
+          "x": 140,
+          "y": 75
+        }
+      ]
+    },
+    {
+      "id": "E16",
+      "from": {
+        "componentId": "FC_1V3",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "CYL_1A1",
+        "port": "B"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 140,
+          "y": 60
+        },
+        {
+          "x": 140,
+          "y": 50
+        },
+        {
+          "x": 115,
+          "y": 50
+        },
+        {
+          "x": 115,
+          "y": 40
+        }
+      ]
+    },
+    {
+      "id": "E17",
+      "from": {
+        "componentId": "J_BUS2",
+        "port": "3"
+      },
+      "to": {
+        "componentId": "V_2M1",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 355,
+          "y": 145
+        },
+        {
+          "x": 355,
+          "y": 160
+        },
+        {
+          "x": 535,
+          "y": 160
+        },
+        {
+          "x": 535,
+          "y": 160
+        }
+      ]
+    },
+    {
+      "id": "E18",
+      "from": {
+        "componentId": "J_BUS3",
+        "port": "3"
+      },
+      "to": {
+        "componentId": "V_2M2",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 380,
+          "y": 145
+        },
+        {
+          "x": 380,
+          "y": 165
+        },
+        {
+          "x": 315,
+          "y": 165
+        },
+        {
+          "x": 315,
+          "y": 160
+        }
+      ]
+    },
+    {
+      "id": "E19",
+      "from": {
+        "componentId": "V_2M1",
+        "port": "3"
+      },
+      "to": {
+        "componentId": "J_EX3",
+        "port": "3"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 545,
+          "y": 160
+        },
+        {
+          "x": 545,
+          "y": 155
+        },
+        {
+          "x": 430,
+          "y": 155
+        },
+        {
+          "x": 430,
+          "y": 145
+        }
+      ]
+    },
+    {
+      "id": "E20",
+      "from": {
+        "componentId": "V_2M2",
+        "port": "3"
+      },
+      "to": {
+        "componentId": "J_EX4",
+        "port": "3"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 325,
+          "y": 160
+        },
+        {
+          "x": 325,
+          "y": 160
+        },
+        {
+          "x": 455,
+          "y": 160
+        },
+        {
+          "x": 455,
+          "y": 145
+        }
+      ]
+    },
+    {
+      "id": "E21",
+      "from": {
+        "componentId": "V_2M1",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "J_VAC",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 535,
+          "y": 145
+        },
+        {
+          "x": 535,
+          "y": 140
+        },
+        {
+          "x": 190,
+          "y": 140
+        },
+        {
+          "x": 190,
+          "y": 150
+        }
+      ]
+    },
+    {
+      "id": "E22",
+      "from": {
+        "componentId": "V_2M2",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "FC_2V3",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 315,
+          "y": 145
+        },
+        {
+          "x": 315,
+          "y": 110
+        },
+        {
+          "x": 245,
+          "y": 110
+        },
+        {
+          "x": 245,
+          "y": 75
+        }
+      ]
+    },
+    {
+      "id": "E23",
+      "from": {
+        "componentId": "FC_2V3",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "J_VAC",
+        "port": "2"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 245,
+          "y": 60
+        },
+        {
+          "x": 245,
+          "y": 110
+        },
+        {
+          "x": 200,
+          "y": 110
+        },
+        {
+          "x": 200,
+          "y": 150
+        }
+      ]
+    },
+    {
+      "id": "E24",
+      "from": {
+        "componentId": "J_VAC",
+        "port": "3"
+      },
+      "to": {
+        "componentId": "ACT_2A1",
+        "port": "A"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 195,
+          "y": 145
+        },
+        {
+          "x": 195,
+          "y": 90
+        },
+        {
+          "x": 25,
+          "y": 90
+        },
+        {
+          "x": 25,
+          "y": 40
+        }
+      ]
+    },
+    {
+      "id": "E25",
+      "from": {
+        "componentId": "J_BUS4",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "V_3M1",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 410,
+          "y": 150
+        },
+        {
+          "x": 410,
+          "y": 165
+        },
+        {
+          "x": 225,
+          "y": 165
+        },
+        {
+          "x": 225,
+          "y": 160
+        }
+      ]
+    },
+    {
+      "id": "E26",
+      "from": {
+        "componentId": "J_BUS4",
+        "port": "3"
+      },
+      "to": {
+        "componentId": "V_3M2",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 405,
+          "y": 145
+        },
+        {
+          "x": 405,
+          "y": 165
+        },
+        {
+          "x": 270,
+          "y": 165
+        },
+        {
+          "x": 270,
+          "y": 160
+        }
+      ]
+    },
+    {
+      "id": "E27",
+      "from": {
+        "componentId": "V_3M1",
+        "port": "3"
+      },
+      "to": {
+        "componentId": "J_EX5",
+        "port": "2"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 235,
+          "y": 160
+        },
+        {
+          "x": 235,
+          "y": 165
+        },
+        {
+          "x": 485,
+          "y": 165
+        },
+        {
+          "x": 485,
+          "y": 150
+        }
+      ]
+    },
+    {
+      "id": "E28",
+      "from": {
+        "componentId": "V_3M2",
+        "port": "3"
+      },
+      "to": {
+        "componentId": "J_EX5",
+        "port": "3"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 280,
+          "y": 160
+        },
+        {
+          "x": 280,
+          "y": 165
+        },
+        {
+          "x": 480,
+          "y": 165
+        },
+        {
+          "x": 480,
+          "y": 145
+        }
+      ]
+    },
+    {
+      "id": "E29",
+      "from": {
+        "componentId": "V_3M1",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "FC_3V2",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 225,
+          "y": 145
+        },
+        {
+          "x": 225,
+          "y": 115
+        },
+        {
+          "x": 175,
+          "y": 115
+        },
+        {
+          "x": 175,
+          "y": 75
+        }
+      ]
+    },
+    {
+      "id": "E30",
+      "from": {
+        "componentId": "FC_3V2",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "CYL_3A1",
+        "port": "A"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 175,
+          "y": 60
+        },
+        {
+          "x": 175,
+          "y": 45
+        },
+        {
+          "x": 150,
+          "y": 45
+        },
+        {
+          "x": 150,
+          "y": 40
+        }
+      ]
+    },
+    {
+      "id": "E31",
+      "from": {
+        "componentId": "V_3M2",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "FC_3V3",
+        "port": "1"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 270,
+          "y": 145
+        },
+        {
+          "x": 270,
+          "y": 110
+        },
+        {
+          "x": 210,
+          "y": 110
+        },
+        {
+          "x": 210,
+          "y": 75
+        }
+      ]
+    },
+    {
+      "id": "E32",
+      "from": {
+        "componentId": "FC_3V3",
+        "port": "2"
+      },
+      "to": {
+        "componentId": "CYL_3A1",
+        "port": "B"
+      },
+      "domain": "pneumatic",
+      "waypoints": [
+        {
+          "x": 210,
+          "y": 60
+        },
+        {
+          "x": 210,
+          "y": 55
+        },
+        {
+          "x": 180,
+          "y": 55
+        },
+        {
+          "x": 180,
+          "y": 40
+        }
+      ]
+    },
+    {
+      "id": "E33",
+      "from": {
+        "componentId": "PWR_24",
+        "port": "OUT"
+      },
+      "to": {
+        "componentId": "PB_1M1",
+        "port": "13"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 605,
+          "y": 30
+        },
+        {
+          "x": 605,
+          "y": 55
+        }
+      ]
+    },
+    {
+      "id": "E34",
+      "from": {
+        "componentId": "PB_1M1",
+        "port": "14"
+      },
+      "to": {
+        "componentId": "SOL_1M1",
+        "port": "A1"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 605,
+          "y": 70
+        },
+        {
+          "x": 605,
+          "y": 140
+        }
+      ]
+    },
+    {
+      "id": "E35",
+      "from": {
+        "componentId": "SOL_1M1",
+        "port": "A2"
+      },
+      "to": {
+        "componentId": "PWR_0",
+        "port": "IN"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 605,
+          "y": 155
+        },
+        {
+          "x": 605,
+          "y": 185
+        }
+      ]
+    },
+    {
+      "id": "E36",
+      "from": {
+        "componentId": "PB_2M1",
+        "port": "14"
+      },
+      "to": {
+        "componentId": "SOL_2M1",
+        "port": "A1"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 630,
+          "y": 70
+        },
+        {
+          "x": 630,
+          "y": 100
+        },
+        {
+          "x": 635,
+          "y": 100
+        },
+        {
+          "x": 635,
+          "y": 140
+        }
+      ]
+    },
+    {
+      "id": "E37",
+      "from": {
+        "componentId": "SOL_2M1",
+        "port": "A2"
+      },
+      "to": {
+        "componentId": "PWR_0",
+        "port": "IN"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 635,
+          "y": 155
+        },
+        {
+          "x": 635,
+          "y": 170
+        },
+        {
+          "x": 605,
+          "y": 170
+        },
+        {
+          "x": 605,
+          "y": 185
+        }
+      ]
+    },
+    {
+      "id": "E38",
+      "from": {
+        "componentId": "PB_2M2",
+        "port": "14"
+      },
+      "to": {
+        "componentId": "SOL_2M2",
+        "port": "A1"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 655,
+          "y": 70
+        },
+        {
+          "x": 655,
+          "y": 110
+        },
+        {
+          "x": 665,
+          "y": 110
+        },
+        {
+          "x": 665,
+          "y": 140
+        }
+      ]
+    },
+    {
+      "id": "E39",
+      "from": {
+        "componentId": "SOL_2M2",
+        "port": "A2"
+      },
+      "to": {
+        "componentId": "PWR_0",
+        "port": "IN"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 665,
+          "y": 155
+        },
+        {
+          "x": 665,
+          "y": 165
+        },
+        {
+          "x": 605,
+          "y": 165
+        },
+        {
+          "x": 605,
+          "y": 185
+        }
+      ]
+    },
+    {
+      "id": "E40",
+      "from": {
+        "componentId": "PB_3M1",
+        "port": "14"
+      },
+      "to": {
+        "componentId": "SOL_3M1",
+        "port": "A1"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 680,
+          "y": 70
+        },
+        {
+          "x": 680,
+          "y": 105
+        },
+        {
+          "x": 695,
+          "y": 105
+        },
+        {
+          "x": 695,
+          "y": 140
+        }
+      ]
+    },
+    {
+      "id": "E41",
+      "from": {
+        "componentId": "SOL_3M1",
+        "port": "A2"
+      },
+      "to": {
+        "componentId": "PWR_0",
+        "port": "IN"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 695,
+          "y": 155
+        },
+        {
+          "x": 695,
+          "y": 175
+        },
+        {
+          "x": 605,
+          "y": 175
+        },
+        {
+          "x": 605,
+          "y": 185
+        }
+      ]
+    },
+    {
+      "id": "E42",
+      "from": {
+        "componentId": "PB_3M2",
+        "port": "14"
+      },
+      "to": {
+        "componentId": "SOL_3M2",
+        "port": "A1"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 705,
+          "y": 70
+        },
+        {
+          "x": 705,
+          "y": 100
+        },
+        {
+          "x": 725,
+          "y": 100
+        },
+        {
+          "x": 725,
+          "y": 140
+        }
+      ]
+    },
+    {
+      "id": "E43",
+      "from": {
+        "componentId": "SOL_3M2",
+        "port": "A2"
+      },
+      "to": {
+        "componentId": "PWR_0",
+        "port": "IN"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 725,
+          "y": 155
+        },
+        {
+          "x": 725,
+          "y": 170
+        },
+        {
+          "x": 605,
+          "y": 170
+        },
+        {
+          "x": 605,
+          "y": 185
+        }
+      ]
+    },
+    {
+      "id": "E44",
+      "from": {
+        "componentId": "PWR_24",
+        "port": "OUT"
+      },
+      "to": {
+        "componentId": "PB_2M1",
+        "port": "13"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 605,
+          "y": 30
+        },
+        {
+          "x": 605,
+          "y": 50
+        },
+        {
+          "x": 630,
+          "y": 50
+        },
+        {
+          "x": 630,
+          "y": 55
+        }
+      ]
+    },
+    {
+      "id": "E45",
+      "from": {
+        "componentId": "PWR_24",
+        "port": "OUT"
+      },
+      "to": {
+        "componentId": "PB_2M2",
+        "port": "13"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 605,
+          "y": 30
+        },
+        {
+          "x": 605,
+          "y": 40
+        },
+        {
+          "x": 655,
+          "y": 40
+        },
+        {
+          "x": 655,
+          "y": 55
+        }
+      ]
+    },
+    {
+      "id": "E46",
+      "from": {
+        "componentId": "PWR_24",
+        "port": "OUT"
+      },
+      "to": {
+        "componentId": "PB_3M1",
+        "port": "13"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 605,
+          "y": 30
+        },
+        {
+          "x": 605,
+          "y": 45
+        },
+        {
+          "x": 680,
+          "y": 45
+        },
+        {
+          "x": 680,
+          "y": 55
+        }
+      ]
+    },
+    {
+      "id": "E47",
+      "from": {
+        "componentId": "PWR_24",
+        "port": "OUT"
+      },
+      "to": {
+        "componentId": "PB_3M2",
+        "port": "13"
+      },
+      "domain": "electrical",
+      "waypoints": [
+        {
+          "x": 605,
+          "y": 30
+        },
+        {
+          "x": 605,
+          "y": 50
+        },
+        {
+          "x": 705,
+          "y": 50
+        },
+        {
+          "x": 705,
+          "y": 55
+        }
+      ]
+    }
+  ]
+}

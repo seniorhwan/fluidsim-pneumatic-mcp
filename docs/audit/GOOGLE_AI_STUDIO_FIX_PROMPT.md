@@ -1,0 +1,156 @@
+# Prompt for AI in Google AI Studio: Fix `fluidsim-pneumatics-mcp` & Add Project-From-Scratch Support
+
+Copy and paste everything below the line into Google AI Studio:
+
+---
+
+You are maintaining `fluidsim-pneumatics-mcp` (a 100% headless TypeScript/Node.js MCP server for Festo FluidSIM Pneumatics 4.5). An empirical audit against Google AI Studio, Windows Node.js `v24`, and 263 official Festo FluidSIM 4.5 `.ct` files uncovered critical compatibility blockers, codec/simulator bugs, and missing project-creation capabilities.
+
+Fix **all** issues below in priority order while preserving all existing passing tests and headless/stdio purity (`console.log` must never be used in MCP server paths).
+
+---
+
+## Part 1: Fix Google AI Studio / Gemini Compatibility Blockers (CRITICAL)
+
+### 1.1 Make All 14+ MCP Tool JSON Schemas 100% Gemini Function-Calling Compatible (`src/mcp/toolSchemas.ts`, `src/mcp/server.ts`)
+**Problem:**
+- `patchOpSchema` in `src/mcp/toolSchemas.ts` uses `z.discriminatedUnion('op', [...])`, which Zod v4 serializes to `oneOf` + `const`.
+- `componentNodeSchema.params` and `update_component.patch.params` use `z.record(z.string(), z.union([z.number(), z.string(), z.boolean()]))`, which serializes to `propertyNames` + `additionalProperties: { type: ["number", "string", "boolean"] }`.
+- Every tool's `inputSchema` emits `"$schema": "http://json-schema.org/draft-07/schema#"`.
+- Google AI Studio / Gemini Function Calling rejects `oneOf`, `anyOf`, `allOf`, `const`, `propertyNames`, `additionalProperties` as an object schema, and union `type` arrays.
+
+**Required Fix:**
+1. Replace `patchOpSchema` (`z.discriminatedUnion`) with a **single flat `z.object`** where `op` is `z.enum(['add_component', 'update_component', 'remove_component', 'connect', 'disconnect', 'set_distance_rule', 'set_label'])` and operation-specific fields (`component`, `id`, `patch`, `removeConnectedEdges`, `from`, `to`, `edgeId`, `componentId`, `markers`, `label`, `side`) are optional properties. Validate required fields per `op` in `applyCircuitPatch` / `handleCircuitApplyPatch` with clear `EngineeringError` messages.
+2. Replace `z.record(z.string(), z.union([z.number(), z.string(), z.boolean()]))` with either:
+   - `paramsJson: z.string().optional().describe('JSON object string of component parameters, e.g. {"strokeMm":100}')` OR
+   - `params: z.array(z.object({ key: z.string(), valueString: z.string().optional(), valueNumber: z.number().optional(), valueBoolean: z.boolean().optional() })).optional()`
+   (You may still accept plain objects internally in `applyCircuitPatch`, but the exposed MCP Zod schema MUST NOT emit `propertyNames` or `type: [...]` arrays.)
+3. Add a unit test in `src/tests/mcpProtocol.test.ts` that calls `client.listTools()` and asserts **zero** occurrences of `$schema`, `oneOf`, `anyOf`, `allOf`, `const`, `propertyNames`, or array `type` values across every tool's `inputSchema` (Note: if `@modelcontextprotocol/sdk` injects `$schema` on `tools/list`, intercept/sanitize the schema or register via a helper that strips unsupported keywords).
+
+### 1.2 Add Streamable HTTP / SSE MCP Transport (`bin/fluidsim-mcp.ts`, `src/mcp/server.ts`)
+**Problem:** Only `StdioServerTransport` is implemented, so web-based AI Studio / remote Gemini clients cannot connect.
+**Required Fix:**
+- Add `--transport stdio|http` (default `stdio`) and `--port <number>` (default `3000`) / `--host <addr>` (default `127.0.0.1`) to `bin/fluidsim-mcp.ts serve`.
+- Wire `StreamableHTTPServerTransport` (from `@modelcontextprotocol/sdk/server/streamableHttp.js`) over `express` (already in `package.json`) on `POST /mcp`, `GET /mcp`, `DELETE /mcp`, plus a `GET /health` endpoint returning `{ ok: true, serverVersion, accessMode }`.
+- Keep `stdio` mode 100% intact for CLI/IDE hosts.
+
+### 1.3 Fix `npm install` `ERESOLVE` & Build/Bin Packaging (`package.json`, `bin/fluidsim-mcp.ts`)
+**Problem:**
+- `npm install` fails with `ERESOLVE` (`vite@8.3.8` vs `esbuild@^0.25.0`).
+- `package.json` `"bin"` points to `.ts` (`./bin/fluidsim-mcp.ts`), `"build"` runs `vite build` on an unused React template, and `print-config` outputs fragile `npx tsx ...`.
+**Required Fix:**
+- Remove unused Vite/React template dependencies (`react`, `react-dom`, `vite`, `@vitejs/plugin-react`, `@tailwindcss/vite`, `tailwindcss`, `autoprefixer`, `lucide-react`, `motion`) OR align `esbuild` to `^0.27.0` if keeping any web UI.
+- Add a real TypeScript build (`tsc -p tsconfig.build.json` or `esbuild` bundle) producing `dist/bin/fluidsim-mcp.js` and point `"bin": { "fluidsim-mcp": "./dist/bin/fluidsim-mcp.js" }`, with `print-config` preferring `node <dist/bin/fluidsim-mcp.js>` when built (or `node <repo>/node_modules/tsx/dist/cli.mjs` as fallback instead of `npx tsx`).
+
+---
+
+## Part 2: Add "Create New Project From Scratch" Feature Set (HIGH)
+
+Agents need to initialize brand-new FluidSIM projects from an empty or nonexistent directory and manage multi-circuit projects cleanly.
+
+### 2.1 Auto-Create Nonexistent Workspace Root (`src/safety/workspaceGuard.ts`, `bin/fluidsim-mcp.ts`)
+- Currently `WorkspaceGuard.ensureRootExists()` throws `WORKSPACE_NOT_FOUND` and crashes the server if `--workspace` points to a new directory.
+- Add `--init-workspace` (or default to creating the directory with `fs.mkdirSync(this.root, { recursive: true })` in `authoring` mode when the parent exists, while still rejecting if `this.root` exists as a non-directory file).
+
+### 2.2 New Tool: `project_create` (`src/mcp/tools/workspaceTools.ts` or `authorTools.ts`, `src/mcp/toolSchemas.ts`, `src/mcp/server.ts`)
+Create a new authoring tool `project_create` (requires `authoring` mode in `TOOL_POLICIES`):
+- **Flat Gemini-compatible Zod input shape:**
+  ```ts
+  export const projectCreateInputShape = {
+    projectDir: z.string().default('.').describe('Relative directory inside workspace (use "." for workspace root).'),
+    name: z.string().min(1).describe('Project name (e.g. "Pick and Place Station").'),
+    description: z.string().optional().describe('Optional engineering description.'),
+    sheetSize: z.enum(['DIN_A4_LANDSCAPE', 'DIN_A3_LANDSCAPE', 'DIN_A4_PORTRAIT']).default('DIN_A3_LANDSCAPE'),
+    author: z.string().optional(),
+    starterCircuit: z.enum(['none', 'blank', 'pneumatic_basic', 'electro_pneumatic_24v']).default('pneumatic_basic'),
+    starterFileName: z.string().default('main.ct').describe('Filename inside <projectDir>/circuits/ (e.g. "main.ct" or "main.fsim.json").'),
+    overwrite: z.boolean().default(false),
+  };
+  ```
+- **Behavior:**
+  1. Resolve `projectDir` safely inside `WorkspaceGuard` jail (reject `..` traversal or symlink escapes).
+  2. Create `<projectDir>/circuits/` and write `<projectDir>/fluidsim-project.json` (manifest containing `schemaVersion: "1.0"`, `name`, `description`, `author`, `sheetSize`, `createdAt`, `circuits: [...]`).
+  3. Write `<projectDir>/README.md` summarizing the project and sheet standard.
+  4. If `starterCircuit !== 'none'`, generate `<projectDir>/circuits/<starterFileName>` with matching sheet dimensions (`DIN_A4_LANDSCAPE`: 297×210 mm, `DIN_A3_LANDSCAPE`: 420×297 mm, `DIN_A4_PORTRAIT`: 210×297 mm) and verify it passes `circuit_validate` (`valid: true, errorCount: 0`).
+  5. Return `{ projectDir, manifestPath, starterCircuitPath, validation }`.
+
+### 2.3 Fix `circuit_create` Templates (`src/mcp/tools/authorTools.ts`)
+- Currently `pneumatic_basic` and `electro_pneumatic_24v` create `MANIFOLD_1` (`pneumatic_junction`) with port `2` unconnected, which immediately fails `circuit_validate` (`OPEN_PNEUMATIC_PORT` error + `DANGLING_JUNCTION` warning).
+- Fix both templates so they pass `circuit_validate` with **`valid: true, errorCount: 0, warningCount: 0`** (e.g., either remove the dangling `MANIFOLD_1` until components are added, or include a complete minimal valid branch such as `3/2` valve + silencer + single-acting cylinder).
+- Add optional `sheetSize` (`DIN_A4_LANDSCAPE` | `DIN_A3_LANDSCAPE` | `DIN_A4_PORTRAIT`) to `circuitCreateInputShape` and `circuitGenerateFromSpecInputShape` (defaulting to `DIN_A3_LANDSCAPE` 420×297 mm or `DIN_A4_LANDSCAPE` 297×210 mm).
+
+### 2.4 Add Circuit File Lifecycle Tools (`src/mcp/tools/authorTools.ts`, `src/mcp/toolSchemas.ts`, `src/mcp/server.ts`, `src/safety/policyCatalog.ts`)
+Add three authoring-mode tools with full `WorkspaceGuard` jail checks:
+- `circuit_clone`: `{ sourcePath, targetPath, overwrite?: boolean, newTitle?: string }` — clones an existing `.ct` or `.fsim.json` (and can convert between `.ct` and `.fsim.json`!), re-validates postcondition.
+- `circuit_rename`: `{ fromPath, toPath, overwrite?: boolean }` — atomic move/rename inside workspace jail.
+- `circuit_delete`: `{ path, confirm: z.boolean() }` — deletes a circuit file inside workspace jail (requires `confirm: true`).
+
+---
+
+## Part 3: Fix Codec, Spec Generator & Windows Test Bugs (HIGH / MEDIUM)
+
+### 3.1 Support All 3 FluidSIM 4.x/4.5 `.ct` Magic Headers (`src/codec/ctBinaryCodec.ts`, `src/codec/ctDetector.ts`)
+**Empirical Finding:** Out of 263 official `.ct` files in `C:\Program Files (x86)\Didactic\fl_sim_p4.en\ct\`, **231 (87.8%)** failed with `UNRECOGNIZED_CIRCUIT_FORMAT` because `isFluidSimCtBuffer()` only checks `3e6c75423f56daaf205628b0c36c08bb`.
+All three official variants share the exact same `FLUIDSIM_CT_MARKER_LINE` (`50c2e8b3557fcece`):
+- `3e6c75423f56daaf205628b0c36c08bb` (32 files)
+- `6e33c0a621ce30e820ce6fa953336de9` (186 files)
+- `7f8943f87a219c112021f2680b898bcf` (45 files)
+Update `isFluidSimCtBuffer()` to recognize all three prefixes (and verify `FLUIDSIM_CT_MARKER_LINE` is present in the header lines).
+
+### 3.2 Fix `ctTextCodec.ts` Wire/Junction Parsing on Real FluidSIM `.ct` Files
+**Empirical Finding:** 17/32 parsed official FluidSIM circuits fail `validateCircuitStatic` with 126 `OPEN_PNEUMATIC_PORT` errors because `ctTextCodec.ts` misses wire connections on rotated components (e.g. `PVS4` at `270°`), `PTriconnection` junctions, and multi-segment polylines (`L ...`). Fix coordinate/port matching for rotated components and `PTriconnection` nodes.
+
+### 3.3 Fix `circuit_generate_from_spec` for Single-Acting + Dwell in `electro-pneumatic-step-chain` (`src/authoring/specGenerator.ts`)
+**Empirical Finding:** `actuators: [{ label: "A", type: "single-acting", throttles: true }, { label: "B", type: "double-acting", throttles: true }]` with `sequence: ["A+", "WAIT:500ms", "B+", "A-B-"]` and `controlMethod: "electro-pneumatic-step-chain"` fails `sequenceVerification` (`expected "B+", observed "A-"`).
+**Fix:** Ensure the solenoid holding a single-acting actuator extended across multiple steps/dwells does not drop for 1 tick during relay step handoff (`K1 -> K2 -> K3`), or use a memory-latch relay (`K_HOLD_A`) set on `A+` and reset on `A-`.
+
+### 3.4 Verify Remaining Catalog Class IDs (`src/catalog/pneumatics45.ts`)
+Update `fluidsim45ClassId` and `fluidsim45IdVerified: true` for the empirically verified FluidSIM 4.5 symbols:
+- `valve_4_2` -> `WV_4`
+- `valve_5_3` -> `WV_5`
+- `quick_exhaust_valve` -> `DV_P1`
+- `shuttle_valve_or` -> `PVS3`
+- `dual_pressure_valve_and` -> `DRSV2_pneu`
+- `pressure_regulator` -> `PressureReducingValve3WaysAdjustableP`
+- `relay_contact_changeover` -> `LWechsler`
+- `timer_relay_off_delay` -> `LRelaismagnet_abfver`
+
+### 3.5 Fix Windows `spawnSync tsx.cmd EINVAL` in Tests (`src/tests/mcpProtocol.test.ts:214`)
+Replace `execFileSync(TSX_BIN, ...)` with `execFileSync(process.execPath, [path.join(REPO_ROOT, 'node_modules/tsx/dist/cli.mjs'), ...])` so tests pass cleanly on Windows Node.js `>=20.12`.
+
+---
+
+## Part 4: Real-World Industrial Festo MPS / Distributing Station Support (HIGH)
+
+Attempting to recreate `Distribution station pneumatic.pdf` (Festo MPS-C Distributing Station) exposed 8 missing components and 5 modeling/validation limitations. Add support for:
+
+### 4.1 Add Missing Industrial Pneumatic Components (`src/catalog/pneumatics45.ts`, `src/codec/ctTextCodec.ts`, `src/simulator/pneumaticSolver.ts`)
+Using the empirically verified FluidSIM 4.5 class IDs from `sym/`:
+- `valve_2_2` -> FluidSIM class `WV_2` (`2/2-Way Directional Control Valve`, ports `1`, `2`, `10`/`12`, supports `normallyOpen?: boolean`).
+- `air_filter` -> FluidSIM class `FilterP` (`Air Filter`, ports `1`, `2`).
+- `check_valve_spring` -> FluidSIM class `CheckValvePilotOperatedSpringLoadedP` or standard spring-loaded check valve (ports `1`, `2`).
+- `pressure_switch_differential` -> FluidSIM class `PEW` (`Differential / Vacuum Pressure Switch`, pneumatic ports `P1`, `P2` + threshold `pressureBar` + electrical contact binding).
+- `blind_plug` -> Terminator on `PConnection` (`ex_type` blind plug) so capped manifold ports (`1`, `11`, `3/5`, `12/14`, `82/84`) pass validation without open-port errors.
+- `vacuum_suction_nozzle` (Venturi ejector), `vacuum_sucker` (suction cup), and `swivel_drive` (`180°` semi-rotary actuator) — extract exact class IDs from `C:\Program Files (x86)\Didactic\fl_sim_p4.en\sym\` once Part 3.1 (multi-magic `.ct` decoder) is complete.
+
+### 4.2 Composite Valve Actuation & Normally Open Support (`src/contracts/circuit.ts`, `src/codec/ctTextCodec.ts`, `src/simulator/validator.ts`)
+- Extend `ValveActuationType` to include `pneumatic_spring` (`PNEU_SPRING_R S TRUE` — internal air-spring `[─<|]`, does NOT require an external wired `12`/`14` port!).
+- Allow optional `manualOverride?: boolean` and `internalPilot?: boolean` on `ValveActuationSide` so valves like `-1M1`, `-2M1`, `-2M2`, `-3M1`, `-3M2` can represent `[manual_override + solenoid + internal_pilot]` on the left and `[spring + pneumatic_spring]` on the right.
+- Add `normallyOpen?: boolean` parameter to `valve_3_2` and `valve_2_2` (and emit the corresponding `SWITCHED_POS_L`/`SWITCHED_POS_R` in `ctTextCodec.ts` and initial flow state in `pneumaticSolver.ts`).
+
+### 4.3 Component Orientation, DIN A3 Sheet Preservation & Pneumatic-Only Sheets
+- Allow `rotationDeg?: 0 | 90 | 180 | 270` on components (do not overwrite with `0` in `src/authoring/layoutRouter.ts:130, 172`), so meter-out throttles (`180°`) and vertical filters (`90°`) preserve orientation.
+- Preserve DIN A3 (`420 × 297 mm`) sheet bounds in `layoutRouter.ts` and `ctTextCodec.ts:949` (do not hardcode `297` on `.ct` parse or expand horizontally to `760 mm` unnecessarily).
+- Add an optional `allowExternalElectricalSheet?: boolean` (or `sheetDomain: 'pneumatic-only' | 'electro-pneumatic'`) metadata/validation option so standalone pneumatic schematics with solenoid tags (`-1M1`..`-3M2`) can validate without `UNBOUND_VALVE_SOLENOID` errors when the electrical ladder is on a separate sheet.
+
+---
+
+## Verification Checklist
+After making all changes, run and verify all pass with exit code 0:
+1. `npm install` (must succeed cleanly without `--legacy-peer-deps`)
+2. `npm run typecheck`
+3. `npm test` (all tests pass on Windows & Linux, including new Gemini schema-compatibility assertions, `project_create` / `circuit_clone` / `circuit_rename` / `circuit_delete` tests, and a `Distribution station pneumatic` recreation test)
+4. `npm run build` (compiles MCP server to `dist/`)
+5. `npm run mcp -- doctor --json`
+6. `npm run inspect-ct -- --check-golden`
+7. End-to-end test: start server against a **nonexistent** `--workspace ./fresh-project`, call `project_create`, `circuit_generate_from_spec` (including single-acting + `WAIT:500ms`), `circuit_apply_patch`, `circuit_validate`, and `circuit_verify_sequence`, and confirm 0 errors.
