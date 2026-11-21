@@ -2,6 +2,7 @@ import type { SequenceAssertion, SimInputEvent } from '../../contracts/simulatio
 import type { McpToolContext } from './context';
 import { loadCircuitFromWorkspace } from './context';
 import { validateCircuitStatic } from '../../simulator/validator';
+import { collectCtVisualFindings } from '../../authoring/postconditionVerifier';
 import { simulateCircuit } from '../../simulator/simulator';
 import { verifyCircuitSequence } from '../../simulator/sequenceVerifier';
 import { paginateWithBudget } from '../../contracts/pagination';
@@ -14,9 +15,19 @@ export function handleCircuitValidate(
   const report = validateCircuitStatic(document, {
     allowExternalElectricalSheet: args.allowExternalElectricalSheet,
   });
+  const rawBytes = ctx.guard.readFileBuffer(relativePath);
+  const visual = collectCtVisualFindings(
+    rawBytes,
+    document.metadata.sheetWidthMm,
+    document.metadata.sheetHeightMm,
+  );
+  const findings = [...report.findings, ...visual.findings];
   return {
     path: relativePath,
-    ...report,
+    valid: report.valid,
+    errorCount: report.errorCount,
+    warningCount: findings.filter((f) => f.severity === 'warning').length,
+    findings,
   };
 }
 

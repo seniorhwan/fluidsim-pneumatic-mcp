@@ -73,6 +73,17 @@ const DEFAULT_CT_A3_HEADER_LINES_HEX: readonly string[] = [
   '50c2e8b3557fcece',
 ];
 
+const DEFAULT_CT_A4_HEADER_B64: readonly string[] = DEFAULT_CT_HEADER_LINES_HEX.map((hex) =>
+  Buffer.from(hex, 'hex').toString('base64'),
+);
+
+export function isDefaultA4Header(headerLinesB64?: readonly string[]): boolean {
+  if (!headerLinesB64 || headerLinesB64.length !== DEFAULT_CT_A4_HEADER_B64.length) {
+    return false;
+  }
+  return DEFAULT_CT_A4_HEADER_B64.every((line, idx) => headerLinesB64[idx] === line);
+}
+
 // Minimal valid 2142-byte WMF blank preview prefix matching FluidSIM 4.5's fixed preview envelope.
 function buildDefaultPreviewBlock(): Buffer {
   const wmf = Buffer.alloc(2142, 0);
@@ -718,9 +729,10 @@ export function encodeCtContainer(container: {
   ctBody: string;
   trailerText?: string;
   sheetWidthMm?: number;
+  sheetHeightMm?: number;
 }): Buffer {
-  const defaultHexLines =
-    (container.sheetWidthMm ?? 297) > 300 ? DEFAULT_CT_A3_HEADER_LINES_HEX : DEFAULT_CT_HEADER_LINES_HEX;
+  const isA3 = (container.sheetWidthMm ?? 297) > 300 || (container.sheetHeightMm ?? 210) > 220;
+  const defaultHexLines = isA3 ? DEFAULT_CT_A3_HEADER_LINES_HEX : DEFAULT_CT_HEADER_LINES_HEX;
   const headerLines =
     container.headerLinesB64 && container.headerLinesB64.length > 0
       ? container.headerLinesB64.map((b64) => Buffer.from(b64, 'base64'))

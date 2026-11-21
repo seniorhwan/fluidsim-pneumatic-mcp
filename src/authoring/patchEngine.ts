@@ -197,8 +197,8 @@ export function applyCircuitPatch(
 
   working.metadata.updatedAt = new Date().toISOString();
 
-  // 3. Incremental auto-layout for newly added/unplaced components + orthogonal wire routing
-  const laidOut = autoLayoutCircuit(working, { incremental: true });
+  // 3. Auto-layout: full DIN ISO 1219 layout when populating a blank circuit, incremental when patching existing
+  const laidOut = autoLayoutCircuit(working, { incremental: originalDoc.components.length > 0 });
 
   return {
     document: laidOut,

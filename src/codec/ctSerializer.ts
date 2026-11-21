@@ -25,6 +25,7 @@ export function serializeCircuitDocument(
     return encodeCtContainer({
       ...container,
       sheetWidthMm: document.metadata.sheetWidthMm,
+      sheetHeightMm: document.metadata.sheetHeightMm,
     });
   }
 

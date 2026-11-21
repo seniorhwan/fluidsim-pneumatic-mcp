@@ -32,6 +32,13 @@ export function getRotatedDimensions(comp: ComponentNode): { w: number; h: numbe
   return { w: baseW, h: baseH };
 }
 
+export function getVisualPaddingRightMm(comp: ComponentNode): number {
+  if (comp.type === 'pressure_switch_differential') return 10;
+  if (comp.type === 'cylinder_double_acting' || comp.type === 'cylinder_single_acting') return 15;
+  if (comp.type.startsWith('valve_') && comp.rightActuation) return 6;
+  return 0;
+}
+
 export function rotatePortOffset(
   offset: { x: number; y: number },
   baseW: number,
@@ -108,8 +115,9 @@ export function autoLayoutCircuit(
   options?: { incremental?: boolean },
 ): CircuitDocument {
   const incremental = options?.incremental ?? false;
-  const targetSheetWidthMm = Math.max(doc.metadata.sheetWidthMm || 297, 210);
-  const targetSheetHeightMm = Math.max(doc.metadata.sheetHeightMm || 210, 148);
+  let targetSheetWidthMm = Math.max(doc.metadata.sheetWidthMm || 297, 210);
+  let targetSheetHeightMm = Math.max(doc.metadata.sheetHeightMm || 210, 148);
+  let targetSheetSize = doc.metadata.sheetSize;
 
   const components: ComponentNode[] = doc.components.map((c) => {
     const rot = getEffectiveRotationDeg(c);
@@ -151,31 +159,39 @@ export function autoLayoutCircuit(
     }
   }
 
-  const isTallSheet = targetSheetHeightMm >= 260;
-  const pneuLayerY: Record<number, number> = isTallSheet
-    ? {
-        0: HEADER_SAFE_Y_MM, // Actuators & top switches (R_SCHALT sits cleanly above at ~30.7 mm)
-        0.5: 62, // Upper branch junctions (vacuum rail)
-        1: 82, // Flow control / filters / check valves / throttles
-        1.5: 112, // Mid-branch ejectors (PAV1) & hanging suction cups (PAV1S)
-        2: 142, // Directional control valves (5/2, 4/2, 5/3, 2/2, 3/2)
-        3: 185, // Manifold buses / backbone junctions / pilot 3/2 valves / logic
-        4: 205, // Air source & Wartungseinheit2 FRL
-      }
-    : {
-        0: HEADER_SAFE_Y_MM, // Actuators
-        0.5: 55,
-        1: 72, // Flow control / quick exhaust / filters
-        1.5: 90,
-        2: 108, // Directional control valves
-        3: 142, // Processing / logic / pilot 3/2 / manifolds
-        4: 170, // Air source & FRL
-      };
+  const computeSheetMetrics = (wMm: number, hMm: number) => {
+    const tall = hMm >= 260;
+    const layerY: Record<number, number> = tall
+      ? {
+          0: HEADER_SAFE_Y_MM, // Actuators & top switches (R_SCHALT sits cleanly above at ~30.7 mm)
+          0.5: 55, // Upper branch junctions (J_VAC_1)
+          1: 75, // Flow control / filters / check valves / throttles
+          1.2: 98, // Lower branch junctions / lateral switches (J_VAC_2, PSW_2B1)
+          1.5: 116, // Mid-branch ejectors (PAV1) & hanging suction cups (PAV1S)
+          2: 144, // Directional control valves (5/2, 4/2, 5/3, 2/2, 3/2)
+          3: 180, // Supply manifold / backbone junctions / pilot 3/2 valves
+          4: 202, // Exhaust manifold / Air source & Wartungseinheit2 FRL
+        }
+      : {
+          0: HEADER_SAFE_Y_MM, // Actuators
+          0.5: 50,
+          1: 68, // Flow control / quick exhaust / filters
+          1.2: 85,
+          1.5: 95,
+          2: 112, // Directional control valves
+          3: 145, // Processing / logic / pilot 3/2 / manifolds
+          4: 170, // Air source & FRL
+        };
+    const printableRight =
+      wMm >= 400 ? Math.min(wMm - MARGIN_X_MM, 345) : Math.min(wMm - MARGIN_X_MM, 245);
+    const pneuRight = hasElectricalComponents ? Math.max(wMm * 0.56, 210) : printableRight;
+    return { pneuLayerY: layerY, maxPrintableRightMm: printableRight, pneuMaxRightMm: pneuRight };
+  };
 
-  // Available horizontal budget for the pneumatic schematic
-  const pneuMaxRightMm = hasElectricalComponents
-    ? Math.max(targetSheetWidthMm * 0.56, 210)
-    : targetSheetWidthMm - MARGIN_X_MM;
+  let { pneuLayerY, maxPrintableRightMm, pneuMaxRightMm } = computeSheetMetrics(
+    targetSheetWidthMm,
+    targetSheetHeightMm,
+  );
 
   let maxPneuX = MARGIN_X_MM;
   for (const comp of components) {
@@ -256,6 +272,17 @@ export function autoLayoutCircuit(
       branches.push(group);
     }
 
+    // Auto-promote DIN A4 -> DIN A3 Landscape for multi-branch or dense circuits so they never cramp
+    if (!incremental && targetSheetWidthMm < 400 && (branches.length >= 3 || components.length > 14)) {
+      targetSheetWidthMm = 420;
+      targetSheetHeightMm = 297;
+      targetSheetSize = 'DIN_A3_LANDSCAPE';
+      ({ pneuLayerY, maxPrintableRightMm, pneuMaxRightMm } = computeSheetMetrics(
+        targetSheetWidthMm,
+        targetSheetHeightMm,
+      ));
+    }
+
     // Sort branches deterministically left-to-right by their primary actuator's label/ID
     const branchSortKey = (group: ComponentNode[]): string => {
       const actuators = group
@@ -281,11 +308,13 @@ export function autoLayoutCircuit(
           // Venturi nozzle sits between the vacuum rail (Layer 1) and supply valve (Layer 2) -> Layer 1.5
           branchLayerOf.set(c.id, 1.5);
         } else if (hasVacuumNozzle && c.type === 'vacuum_sucker') {
-          // Suction cup hangs cleanly below filter/junction in Layer 1.5
+          // Suction cup hangs cleanly below J_VAC_2 in Layer 1.5
           branchLayerOf.set(c.id, 1.5);
         } else if (hasVacuumNozzle && c.type === 'pressure_switch_differential') {
-          // Vacuum pressure switch sits at the top of the branch (Layer 0)
-          branchLayerOf.set(c.id, 0);
+          // Vacuum pressure switch sits in Layer 1.2 beside J_VAC_2 for a straight horizontal tap
+          branchLayerOf.set(c.id, 1.2);
+        } else if (c.type === 'check_valve_spring' || c.type === 'check_valve') {
+          branchLayerOf.set(c.id, 1);
         } else if (c.type === 'valve_3_2') {
           // A 3/2 valve directly driving an actuator, flow-control, throttle, quick-exhaust, or venturi
           // acts as a final control valve (Layer 2) rather than a pilot signal valve (Layer 3).
@@ -330,24 +359,32 @@ export function autoLayoutCircuit(
           branchLayerOf.set(c.id, Math.max(0, Math.min(3, base)));
         }
       }
-      // Two-pass dynamic layer assignment for branch-internal pneumatic_junctions:
-      // place vacuum/branch junctions in sub-layer 0.5 (cleanly above Layer 1 throttles/filters, below Layer 0 switches).
+      // Assign branch-internal pneumatic_junctions cleanly:
+      // J_VAC_1 (connected to check_valve / throttle) -> Layer 0.5 (above Layer 1)
+      // J_VAC_2 (connected to vacuum_sucker / pressure_switch) -> Layer 1.2 (between filter above and suction cup below)
       for (let pass = 0; pass < 3; pass++) {
         for (const c of group) {
           if (c.type !== 'pneumatic_junction') continue;
           const nbrs = neighborIds.get(c.id);
+          let hasSuckerOrPsw = false;
           let best = Number.POSITIVE_INFINITY;
           if (nbrs) {
             for (const nid of nbrs) {
               if (!groupIds.has(nid)) continue;
+              const nc = compById.get(nid);
+              if (nc && (nc.type === 'vacuum_sucker' || nc.type === 'pressure_switch_differential')) {
+                hasSuckerOrPsw = true;
+              }
               const nl = branchLayerOf.get(nid);
               if (nl !== undefined && nl < best) {
                 best = nl;
               }
             }
           }
-          if (Number.isFinite(best)) {
-            branchLayerOf.set(c.id, hasVacuumNozzle ? 0.5 : Math.max(0, Math.min(2, best)));
+          if (hasVacuumNozzle) {
+            branchLayerOf.set(c.id, hasSuckerOrPsw ? 1.2 : 0.5);
+          } else if (Number.isFinite(best)) {
+            branchLayerOf.set(c.id, Math.max(0, Math.min(2, best)));
           }
         }
       }
@@ -442,7 +479,7 @@ export function autoLayoutCircuit(
         let curRow: ComponentNode[] = [];
         let curRowW = 0;
         for (const comp of comps) {
-          const { w } = getRotatedDimensions(comp);
+          const w = getRotatedDimensions(comp).w + getVisualPaddingRightMm(comp);
           const needed = curRow.length === 0 ? w : curRowW + itemGap + w;
           if (curRow.length > 0 && needed > colSpan) {
             rows.push(curRow);
@@ -458,19 +495,21 @@ export function autoLayoutCircuit(
         let rowY = snap(Math.max(pneuLayerY[layer] ?? 140, branchMinY));
         for (const row of rows) {
           const rowTotalW =
-            row.reduce((s, c) => s + getRotatedDimensions(c).w, 0) + Math.max(0, row.length - 1) * itemGap;
+            row.reduce((s, c) => s + getRotatedDimensions(c).w + getVisualPaddingRightMm(c), 0) +
+            Math.max(0, row.length - 1) * itemGap;
           const startX = snap(Math.max(colLeft, colLeft + (colSpan - rowTotalW) / 2));
           let cx = startX;
           let rowMaxH = 0;
           for (const comp of row) {
-            const { w, h } = getRotatedDimensions(comp);
+            const { w: rawW, h } = getRotatedDimensions(comp);
+            const w = rawW + getVisualPaddingRightMm(comp);
             const rot = getEffectiveRotationDeg(comp);
             comp.layout = {
               x: snap(cx),
               y: snap(rowY),
               rotationDeg: rot,
             };
-            placedCenterInBranch.set(comp.id, comp.layout.x + w / 2);
+            placedCenterInBranch.set(comp.id, comp.layout.x + rawW / 2);
             cx = snap(comp.layout.x + w + itemGap);
             rowMaxH = Math.max(rowMaxH, h);
             maxPneuX = Math.max(maxPneuX, comp.layout.x + w);
@@ -485,7 +524,7 @@ export function autoLayoutCircuit(
     }
 
     // Place Layer 4 Air Supply (air_source -> air_service_unit) cleanly at bottom-left,
-    // and Layer 3 Backbone (manifolds, supply junctions, terminators) cleanly to the right of FRL
+    // and Layer 3 Backbone manifolds on separate horizontal rows (supply BUS_1 at y~180, exhaust BUS_EXH at y~202)
     const backboneLayer4 = pneuUnplaced
       .filter((c) => backboneIds.has(c.id) && (c.type === 'air_source' || c.type === 'air_service_unit'))
       .sort((a, b) => {
@@ -497,7 +536,7 @@ export function autoLayoutCircuit(
 
     let backboneBottomY = maxBranchBottomY;
     let supplyRightX = MARGIN_X_MM;
-    const baseBusY = snap(Math.max(pneuLayerY[3] ?? 185, maxBranchBottomY + MIN_CLEARANCE_MM + 6));
+    const baseBusY = snap(Math.max(pneuLayerY[3] ?? 180, maxBranchBottomY + MIN_CLEARANCE_MM + 12));
     if (backboneLayer4.length > 0) {
       let cursorX = MARGIN_X_MM;
       for (const comp of backboneLayer4) {
@@ -505,7 +544,7 @@ export function autoLayoutCircuit(
         const rot = getEffectiveRotationDeg(comp);
         comp.layout = {
           x: snap(cursorX),
-          y: snap(baseBusY),
+          y: snap(comp.type === 'air_source' ? baseBusY + 5 : baseBusY - 9),
           rotationDeg: rot,
         };
         cursorX = snap(comp.layout.x + w + MIN_CLEARANCE_MM + 4);
@@ -515,11 +554,32 @@ export function autoLayoutCircuit(
       }
     }
 
+    const isExhaustManifold = (c: ComponentNode): boolean => {
+      if (c.type !== 'pneumatic_manifold') return false;
+      if (String(c.params.busRole ?? '') === 'exhaust') return true;
+      return doc.connections.some((e) => {
+        const isFrom = e.from.componentId === c.id;
+        const isTo = e.to.componentId === c.id;
+        if (!isFrom && !isTo) return false;
+        const otherId = isFrom ? e.to.componentId : e.from.componentId;
+        const otherPort = isFrom ? e.to.port : e.from.port;
+        const other = compById.get(otherId);
+        if (!other) return false;
+        if (other.type === 'exhaust_silencer') return true;
+        if (other.type.startsWith('valve_') && (otherPort === '3' || otherPort === '5')) return true;
+        return false;
+      });
+    };
+
     const backboneLayer3 = pneuUnplaced
       .filter((c) => backboneIds.has(c.id) && c.type !== 'air_source' && c.type !== 'air_service_unit')
       .sort((a, b) => {
-        const rank = (c: ComponentNode): number =>
-          c.type === 'pneumatic_manifold' ? 0 : c.type === 'pneumatic_junction' ? 1 : 2;
+        const rank = (c: ComponentNode): number => {
+          if (c.type === 'pneumatic_manifold') {
+            return isExhaustManifold(c) ? 1 : 0;
+          }
+          return c.type === 'pneumatic_junction' ? 2 : 3;
+        };
         const ra = rank(a);
         const rb = rank(b);
         if (ra !== rb) return ra - rb;
@@ -527,7 +587,7 @@ export function autoLayoutCircuit(
       });
 
     if (backboneLayer3.length > 0) {
-      const busStartX = supplyRightX > MARGIN_X_MM ? snap(supplyRightX + MIN_CLEARANCE_MM + 6) : MARGIN_X_MM;
+      const busStartX = supplyRightX > MARGIN_X_MM ? snap(supplyRightX + MIN_CLEARANCE_MM + 10) : MARGIN_X_MM;
       const gapX = MIN_CLEARANCE_MM + 8;
       let rowY = baseBusY;
       let cursorX = busStartX;
@@ -536,17 +596,22 @@ export function autoLayoutCircuit(
       for (const comp of backboneLayer3) {
         const { w, h } = getRotatedDimensions(comp);
         const rot = getEffectiveRotationDeg(comp);
-        if (cursorX > busStartX && cursorX + w > pneuMaxRightMm) {
+        const exhBus = isExhaustManifold(comp);
+        // Always place exhaust manifold on its own lower horizontal row so supply & exhaust buses never overlap
+        if ((exhBus && cursorX > busStartX) || (cursorX > busStartX && cursorX + w > pneuMaxRightMm)) {
           cursorX = busStartX;
-          rowY = snap(rowY + Math.max(rowMaxH, 8) + MIN_CLEARANCE_MM + 6);
+          rowY = snap(rowY + Math.max(rowMaxH, 8) + MIN_CLEARANCE_MM + 12);
           rowMaxH = 0;
         }
+        const placedX = exhBus && cursorX === busStartX ? snap(busStartX + 15) : snap(cursorX);
         comp.layout = {
-          x: snap(cursorX),
+          x: placedX,
           y: snap(rowY),
           rotationDeg: rot,
         };
-        cursorX = snap(comp.layout.x + w + gapX);
+        // Reserve full horizontal span for manifold bus rails so subsequent manifolds/terminators never share its row
+        const reservedW = comp.type === 'pneumatic_manifold' ? Math.max(w, pneuMaxRightMm - cursorX) : w;
+        cursorX = snap(comp.layout.x + reservedW + gapX);
         rowMaxH = Math.max(rowMaxH, h);
         maxPneuX = Math.max(maxPneuX, comp.layout.x + w);
         backboneBottomY = Math.max(backboneBottomY, comp.layout.y + h);
@@ -567,9 +632,10 @@ export function autoLayoutCircuit(
 
   // Electrical 24V / 0V ladder section placed cleanly to the right of pneumatic zone (starting at y >= 40 mm)
   const elecOriginX = snap(Math.max(150, maxPneuX + 25));
-  const elecLayerY: Record<number, number> = isTallSheet
+  const elecLayerY: Record<number, number> = targetSheetHeightMm >= 260
     ? {
         10: HEADER_SAFE_Y_MM, // +24V rail
+        10.5: 58, // Top 24V distribution bus junctions
         11: 80, // Pushbuttons / limit switches / proximity sensors
         12: 125, // Relay contacts / junctions
         13: 170, // Relay coils / timers / counters / solenoids / lamps
@@ -577,13 +643,40 @@ export function autoLayoutCircuit(
       }
     : {
         10: HEADER_SAFE_Y_MM, // +24V rail
+        10.5: 52, // Top 24V distribution bus junctions
         11: 70, // Pushbuttons / limit switches / proximity sensors
         12: 105, // Relay contacts / junctions
         13: 140, // Relay coils / timers / counters / solenoids / lamps
         14: 175, // 0V rail
       };
 
+  // Promote any electrical_junction directly connected to power_24v or ESTOP into top bus band 10.5
+  const bus24vLayerList = elecLayers.get(12);
+  if (bus24vLayerList && bus24vLayerList.length > 0) {
+    const keepIn12: ComponentNode[] = [];
+    const topBusList = elecLayers.get(10.5) ?? [];
+    for (const c of bus24vLayerList) {
+      const nbrs = neighborIds.get(c.id);
+      const isTop24vBus =
+        c.type === 'electrical_junction' &&
+        (c.id === 'BUS_24V' ||
+          (nbrs &&
+            Array.from(nbrs).some((nid) => {
+              const nc = compById.get(nid);
+              return nc && (nc.type === 'power_24v' || nc.label === 'ESTOP' || nc.id.includes('ESTOP'));
+            })));
+      if (isTop24vBus) {
+        topBusList.push(c);
+      } else {
+        keepIn12.push(c);
+      }
+    }
+    if (topBusList.length > 0) elecLayers.set(10.5, topBusList);
+    elecLayers.set(12, keepIn12);
+  }
+
   for (const [layer, comps] of Array.from(elecLayers.entries()).sort((a, b) => a[0] - b[0])) {
+    if (comps.length === 0) continue;
     comps.sort((a, b) => {
       const rank = (c: ComponentNode): number => {
         if (c.label === 'ESTOP' || c.id.includes('ESTOP')) return 0;
@@ -596,24 +689,70 @@ export function autoLayoutCircuit(
       if (ra !== rb) return ra - rb;
       return naturalCompare(a.id, b.id);
     });
+    const availW = Math.max(80, maxPrintableRightMm - elecOriginX);
+    const sumW = comps.reduce((s, c) => s + getRotatedDimensions(c).w, 0);
+    const gap =
+      comps.length > 1
+        ? Math.max(MIN_CLEARANCE_MM, Math.min(15, Math.floor((availW - sumW) / (comps.length - 1))))
+        : 0;
     let cursorX = elecOriginX;
-    const baseY = elecLayerY[layer] ?? 105;
+    let baseY = elecLayerY[layer] ?? 105;
+    let rowMaxH = 0;
 
     for (const comp of comps) {
-      const { w } = getRotatedDimensions(comp);
+      const { w, h } = getRotatedDimensions(comp);
       const rot = getEffectiveRotationDeg(comp);
+      if (cursorX > elecOriginX && cursorX + w > maxPrintableRightMm) {
+        cursorX = elecOriginX;
+        baseY = snap(baseY + Math.max(rowMaxH, 10) + 6);
+        rowMaxH = 0;
+      }
       comp.layout = {
-        x: snap(cursorX),
+        x: Math.round(cursorX),
         y: snap(baseY),
         rotationDeg: rot,
       };
-      cursorX = snap(comp.layout.x + w + 15);
+      rowMaxH = Math.max(rowMaxH, h);
+      cursorX = comp.layout.x + w + gap;
+    }
+  }
+
+  // Auto-orient check valves when Port 1 connects above and Port 2 connects below (unless explicitly rotated)
+  if (!incremental) {
+    for (const comp of components) {
+      if (
+        (comp.type === 'check_valve' || comp.type === 'check_valve_spring') &&
+        comp.rotationDeg === undefined &&
+        comp.layout
+      ) {
+        let p1Y: number | undefined;
+        let p2Y: number | undefined;
+        for (const e of doc.connections) {
+          if (e.from.componentId === comp.id && e.from.port === '1') {
+            p1Y = compById.get(e.to.componentId)?.layout?.y;
+          } else if (e.to.componentId === comp.id && e.to.port === '1') {
+            p1Y = compById.get(e.from.componentId)?.layout?.y;
+          } else if (e.from.componentId === comp.id && e.from.port === '2') {
+            p2Y = compById.get(e.to.componentId)?.layout?.y;
+          } else if (e.to.componentId === comp.id && e.to.port === '2') {
+            p2Y = compById.get(e.from.componentId)?.layout?.y;
+          }
+        }
+        if (p1Y !== undefined && p2Y !== undefined && p1Y < p2Y) {
+          comp.rotationDeg = 180;
+          comp.layout.rotationDeg = 180;
+        }
+      }
     }
   }
 
   // Always enforce zero-overlap bounding boxes (fixed-point resolution for both full & incremental)
-  const wrapLimitX = hasElectricalComponents ? undefined : pneuMaxRightMm;
-  resolveBoundingBoxOverlaps(components, wrapLimitX);
+  const wrapLimitX = hasElectricalComponents
+    ? targetSheetWidthMm >= 400
+      ? maxPrintableRightMm
+      : undefined
+    : pneuMaxRightMm;
+  resolveBoundingBoxOverlaps(components, wrapLimitX, hasElectricalComponents ? elecOriginX : undefined);
 
   // Recompute sheet bounds after overlap resolution
   let maxRightMm = targetSheetWidthMm;
@@ -625,21 +764,25 @@ export function autoLayoutCircuit(
     maxBottomMm = Math.max(maxBottomMm, comp.layout.y + h + MARGIN_Y_MM);
   }
 
-  // Build bounding boxes for obstacle-aware corridor routing
+  // Build bounding boxes for obstacle-aware corridor routing (include right-side spring overhang for PSW1/valves)
   const allBoxes: LayoutBox[] = components
     .filter((c): c is ComponentNode & { layout: NonNullable<ComponentNode['layout']> } => Boolean(c.layout))
     .map((comp) => {
       const { w, h } = getRotatedDimensions(comp);
+      const rightPad =
+        comp.type === 'pressure_switch_differential' || comp.type.startsWith('valve_') ? 8 : 0;
       return {
         comp,
         x: comp.layout.x,
         y: comp.layout.y,
-        w,
+        w: w + rightPad,
         h,
       };
     });
 
-  // Route orthogonal Manhattan hoses/wires for all connections
+  // Route orthogonal Manhattan hoses/wires for all connections while avoiding superimposed horizontal & vertical runs
+  const usedHorizSegments: HorizSegment[] = [];
+  const usedVertSegments: VertSegment[] = [];
   const connections = doc.connections.map((edge, idx) => {
     const fromComp = compById.get(edge.from.componentId);
     const toComp = compById.get(edge.to.componentId);
@@ -659,7 +802,42 @@ export function autoLayoutCircuit(
       y: Math.round((toComp.layout.y + toRotOffset.y) * 100) / 100,
     };
 
-    const waypoints = routeOrthogonalManhattan(p1, p2, idx, allBoxes, fromComp.id, toComp.id);
+    // Manifold riser ports ('2'..'7') align directly beneath their target valve port in .ct -> emit straight vertical line
+    const isFromManifoldRiser =
+      fromComp.type === 'pneumatic_manifold' && Number(edge.from.port) >= 2 && Number(edge.from.port) <= 7;
+    const isToManifoldRiser =
+      toComp.type === 'pneumatic_manifold' && Number(edge.to.port) >= 2 && Number(edge.to.port) <= 7;
+    if (isFromManifoldRiser) {
+      usedVertSegments.push({ x: p2.x, minY: Math.min(p1.y, p2.y), maxY: Math.max(p1.y, p2.y) });
+      return {
+        ...edge,
+        waypoints: [
+          { x: p2.x, y: p1.y },
+          { x: p2.x, y: p2.y },
+        ],
+      };
+    }
+    if (isToManifoldRiser) {
+      usedVertSegments.push({ x: p1.x, minY: Math.min(p1.y, p2.y), maxY: Math.max(p1.y, p2.y) });
+      return {
+        ...edge,
+        waypoints: [
+          { x: p1.x, y: p1.y },
+          { x: p1.x, y: p2.y },
+        ],
+      };
+    }
+
+    const waypoints = routeOrthogonalManhattan(
+      p1,
+      p2,
+      idx,
+      allBoxes,
+      fromComp.id,
+      toComp.id,
+      usedHorizSegments,
+      usedVertSegments,
+    );
     return {
       ...edge,
       waypoints,
@@ -673,6 +851,7 @@ export function autoLayoutCircuit(
     ...doc,
     metadata: {
       ...doc.metadata,
+      ...(sheetWidthMm > 300 ? { sheetSize: 'DIN_A3_LANDSCAPE' as const } : targetSheetSize ? { sheetSize: targetSheetSize } : {}),
       sheetWidthMm,
       sheetHeightMm,
     },
@@ -681,19 +860,62 @@ export function autoLayoutCircuit(
   };
 }
 
-function horizontalSegmentHitsBox(
+interface HorizSegment {
+  y: number;
+  minX: number;
+  maxX: number;
+}
+
+interface VertSegment {
+  x: number;
+  minY: number;
+  maxY: number;
+}
+
+function horizontalSegmentHitsBoxOrWire(
   x1: number,
   x2: number,
   y: number,
   boxes: readonly LayoutBox[],
   ignoreA: string,
   ignoreB: string,
+  usedHorizSegments: readonly HorizSegment[],
 ): boolean {
   const minX = Math.min(x1, x2);
   const maxX = Math.max(x1, x2);
   for (const b of boxes) {
     if (b.comp.id === ignoreA || b.comp.id === ignoreB) continue;
-    if (y > b.y - 2 && y < b.y + b.h + 2 && maxX > b.x - 2 && minX < b.x + b.w + 2) {
+    if (y > b.y - 2.5 && y < b.y + b.h + 2.5 && maxX > b.x - 2.5 && minX < b.x + b.w + 2.5) {
+      return true;
+    }
+  }
+  for (const seg of usedHorizSegments) {
+    if (Math.abs(y - seg.y) < 3 && maxX >= seg.minX - 1 && minX <= seg.maxX + 1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function verticalSegmentHitsBoxOrWire(
+  x: number,
+  y1: number,
+  y2: number,
+  boxes: readonly LayoutBox[],
+  ignoreA: string,
+  ignoreB: string,
+  usedVertSegments: readonly VertSegment[],
+): boolean {
+  const minY = Math.min(y1, y2);
+  const maxY = Math.max(y1, y2);
+  for (const b of boxes) {
+    if (b.comp.id === ignoreA || b.comp.id === ignoreB) continue;
+    if (x > b.x - 2.5 && x < b.x + b.w + 2.5 && maxY > b.y - 2.5 && minY < b.y + b.h + 2.5) {
+      return true;
+    }
+  }
+  for (const seg of usedVertSegments) {
+    if (Math.abs(x - seg.x) < 2 && maxY >= seg.minY - 0.5 && minY <= seg.maxY + 0.5) {
       return true;
     }
   }
@@ -707,23 +929,78 @@ function routeOrthogonalManhattan(
   boxes: readonly LayoutBox[],
   fromId: string,
   toId: string,
+  usedHorizSegments: HorizSegment[],
+  usedVertSegments: VertSegment[],
 ): Point2D[] {
-  if (p1.x === p2.x || p1.y === p2.y) {
-    return [p1, p2];
+  if (Math.abs(p1.x - p2.x) < 0.01 || Math.abs(p1.y - p2.y) < 0.01) {
+    const straightHoriz = Math.abs(p1.y - p2.y) < 0.01;
+    const straightOk = straightHoriz
+      ? !horizontalSegmentHitsBoxOrWire(p1.x, p2.x, p1.y, boxes, fromId, toId, usedHorizSegments)
+      : !verticalSegmentHitsBoxOrWire(p1.x, p1.y, p2.y, boxes, fromId, toId, usedVertSegments);
+    if (straightOk) {
+      if (straightHoriz && Math.abs(p1.x - p2.x) >= 1) {
+        usedHorizSegments.push({ y: p1.y, minX: Math.min(p1.x, p2.x), maxX: Math.max(p1.x, p2.x) });
+      }
+      if (!straightHoriz && Math.abs(p1.y - p2.y) >= 1) {
+        usedVertSegments.push({ x: p1.x, minY: Math.min(p1.y, p2.y), maxY: Math.max(p1.y, p2.y) });
+      }
+      return [p1, p2];
+    }
   }
+
+  // Try clean 2-segment L-routes first when vertical/horizontal start segments don't collide or superimpose
+  // L-route A: horizontal at p1.y, then vertical at p2.x
+  if (
+    !horizontalSegmentHitsBoxOrWire(p1.x, p2.x, p1.y, boxes, fromId, toId, usedHorizSegments) &&
+    !verticalSegmentHitsBoxOrWire(p2.x, p1.y, p2.y, boxes, fromId, toId, usedVertSegments)
+  ) {
+    usedHorizSegments.push({ y: p1.y, minX: Math.min(p1.x, p2.x), maxX: Math.max(p1.x, p2.x) });
+    usedVertSegments.push({ x: p2.x, minY: Math.min(p1.y, p2.y), maxY: Math.max(p1.y, p2.y) });
+    return [p1, { x: p2.x, y: p1.y }, p2];
+  }
+  if (
+    !verticalSegmentHitsBoxOrWire(p1.x, p1.y, p2.y, boxes, fromId, toId, usedVertSegments) &&
+    !horizontalSegmentHitsBoxOrWire(p1.x, p2.x, p2.y, boxes, fromId, toId, usedHorizSegments)
+  ) {
+    usedVertSegments.push({ x: p1.x, minY: Math.min(p1.y, p2.y), maxY: Math.max(p1.y, p2.y) });
+    usedHorizSegments.push({ y: p2.y, minX: Math.min(p1.x, p2.x), maxX: Math.max(p1.x, p2.x) });
+    return [p1, { x: p1.x, y: p2.y }, p2];
+  }
+
   const baseMidY = snap((p1.y + p2.y) / 2);
-  const laneOffsets = [0, 1, -1, 2, -2, 3, -3, 4, -4];
+  const laneOffsets = [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6];
   const preferredStart = channelIndex % 3;
   let chosenY = snap(baseMidY + ((channelIndex % 5) - 2) * GRID_MM);
 
   for (let k = 0; k < laneOffsets.length; k++) {
     const off = laneOffsets[(k + preferredStart) % laneOffsets.length];
     const candidateY = snap(baseMidY + off * GRID_MM);
-    if (candidateY >= 20 && !horizontalSegmentHitsBox(p1.x, p2.x, candidateY, boxes, fromId, toId)) {
+    if (
+      candidateY >= 25 &&
+      !horizontalSegmentHitsBoxOrWire(p1.x, p2.x, candidateY, boxes, fromId, toId, usedHorizSegments) &&
+      !verticalSegmentHitsBoxOrWire(p1.x, p1.y, candidateY, boxes, fromId, toId, usedVertSegments) &&
+      !verticalSegmentHitsBoxOrWire(p2.x, candidateY, p2.y, boxes, fromId, toId, usedVertSegments)
+    ) {
       chosenY = candidateY;
       break;
     }
   }
+
+  usedHorizSegments.push({
+    y: chosenY,
+    minX: Math.min(p1.x, p2.x),
+    maxX: Math.max(p1.x, p2.x),
+  });
+  usedVertSegments.push({
+    x: p1.x,
+    minY: Math.min(p1.y, chosenY),
+    maxY: Math.max(p1.y, chosenY),
+  });
+  usedVertSegments.push({
+    x: p2.x,
+    minY: Math.min(chosenY, p2.y),
+    maxY: Math.max(chosenY, p2.y),
+  });
 
   return [
     p1,
@@ -737,12 +1014,16 @@ function routeOrthogonalManhattan(
  * Iterative fixed-point overlap resolver guaranteeing zero overlapping bounding boxes
  * across all components with at least MIN_CLEARANCE_MM spacing while preserving top header margin.
  */
-function resolveBoundingBoxOverlaps(components: ComponentNode[], maxRightMm?: number): void {
+function resolveBoundingBoxOverlaps(
+  components: ComponentNode[],
+  maxRightMm?: number,
+  elecOriginX?: number,
+): void {
   const boxes = components.map((c) => {
     const { w, h } = getRotatedDimensions(c);
     return {
       comp: c,
-      w,
+      w: w + getVisualPaddingRightMm(c),
       h,
     };
   });
@@ -778,7 +1059,8 @@ function resolveBoundingBoxOverlaps(components: ComponentNode[], maxRightMm?: nu
           const anchor = target === a ? b : a;
           const nextX = snap(anchor.comp.layout!.x + anchor.w + MIN_CLEARANCE_MM + GRID_MM);
           if (maxRightMm !== undefined && nextX + target.w > maxRightMm) {
-            target.comp.layout!.x = MARGIN_X_MM;
+            const isElec = (getCatalogComponent(target.comp.type)?.layoutLayer ?? 3) >= 10;
+            target.comp.layout!.x = isElec && elecOriginX !== undefined ? elecOriginX : MARGIN_X_MM;
             target.comp.layout!.y = snap(
               Math.max(target.comp.layout!.y, anchor.comp.layout!.y + anchor.h + MIN_CLEARANCE_MM + GRID_MM),
             );

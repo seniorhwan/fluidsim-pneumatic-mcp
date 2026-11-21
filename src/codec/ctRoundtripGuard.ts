@@ -1,5 +1,6 @@
 import type { CircuitDocument } from '../contracts/circuit';
 import { EngineeringError } from '../contracts/errors';
+import { isDefaultA4Header } from './ctBinaryCodec';
 import { parseCircuitBuffer } from './ctParser';
 import { computeSemanticFingerprint, type PreservedCtSections } from './ctTextCodec';
 
@@ -20,13 +21,18 @@ function checkRawAstPreserved(expected: CircuitDocument, reparsed: CircuitDocume
 
   if (expSec?.kind === 'fluidsim-4.5-ct') {
     if (repSec?.kind !== 'fluidsim-4.5-ct') return false;
-    if (JSON.stringify(repSec.headerLinesB64) !== JSON.stringify(expSec.headerLinesB64)) return false;
-    if (repSec.previewBlockB64 !== expSec.previewBlockB64) return false;
-    if ((repSec.fsPreviewBlock ?? '') !== (expSec.fsPreviewBlock ?? '')) return false;
-
     const isUnmodified =
       Boolean(expSec.originalSemanticFingerprint) &&
       computeSemanticFingerprint(expected) === expSec.originalSemanticFingerprint;
+    const headerMatches = JSON.stringify(repSec.headerLinesB64) === JSON.stringify(expSec.headerLinesB64);
+    const allowedA4ToA3Upgrade =
+      !isUnmodified &&
+      isDefaultA4Header(expSec.headerLinesB64) &&
+      (expected.metadata.sheetWidthMm > 300 || expected.metadata.sheetHeightMm > 220);
+    if (!headerMatches && !allowedA4ToA3Upgrade) return false;
+    if (repSec.previewBlockB64 !== expSec.previewBlockB64) return false;
+    if ((repSec.fsPreviewBlock ?? '') !== (expSec.fsPreviewBlock ?? '')) return false;
+
     if (isUnmodified) {
       if (repSec.trailerText !== expSec.trailerText) return false;
       if (repSec.originalCtBody !== expSec.originalCtBody) return false;

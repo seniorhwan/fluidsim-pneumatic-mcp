@@ -6,7 +6,16 @@ import type {
   DistanceRuleMarker,
   ValveActuationSide,
 } from '../contracts/circuit';
-import type { DecodedCtContainer } from './ctBinaryCodec';
+import { isDefaultA4Header, type DecodedCtContainer } from './ctBinaryCodec';
+import {
+  getFluidSimPrintableBounds,
+  routeCtConnections,
+  verifyCtWireGeometryInvariants,
+  type CtRoutingEdge,
+  type CtRoutingObstacle,
+  type CtRoutingPort,
+  type CtWireGeometryReport,
+} from './ctWireRouter';
 import { getCatalogComponent, getPortDefinition } from '../catalog/pneumatics45';
 import { autoLayoutCircuit, getEffectivePortOffset, rotatePortOffset } from '../authoring/layoutRouter';
 import {
@@ -678,6 +687,26 @@ export function parseCtContainerToDocument(
           type: 'pneumatic_manifold',
           ...(lbl ? { label: lbl } : {}),
           params: { busRole },
+          ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+          layout,
+          rawMetadata,
+        });
+      }
+      continue;
+    }
+
+    const elecRailOwner = getScalarProp(obj.props, '_MCP_ELEC_RAIL_OWNER');
+    const elecRailType = getScalarProp(obj.props, '_MCP_ELEC_RAIL_TYPE');
+    if (elecRailOwner && elecRailType && obj.cls === 'ETriconnection') {
+      compIdByObjIdx.set(objIdx, elecRailOwner);
+      compTypeByObjIdx.set(objIdx, elecRailType);
+      if (elecRailType === 'electrical_junction' && !manifoldIdSet.has(elecRailOwner)) {
+        manifoldIdSet.add(elecRailOwner);
+        usedIds.add(elecRailOwner);
+        components.push({
+          id: elecRailOwner,
+          type: 'electrical_junction',
+          params: {},
           ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
           layout,
           rawMetadata,
@@ -1378,6 +1407,12 @@ export function parseCtContainerToDocument(
         return { compId, port: mappedPort, cls: parentObj?.cls ?? '', portObj };
       }
 
+      const portObjForRail = objByIdx.get(endpointIdx);
+      const elecRailPort = portObjForRail ? getScalarProp(portObjForRail.props, '_MCP_ELEC_RAIL_PORT') : undefined;
+      if (elecRailPort) {
+        return { compId, port: elecRailPort, cls: parentObj?.cls ?? '', portObj: portObjForRail };
+      }
+
       let port: string | undefined;
       if (parentObj?.cls === 'CompressorFixedP') {
         port = p.gateNum === 1 ? '2' : p.gateNum === 2 ? '1' : undefined;
@@ -1934,6 +1969,17 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
 
   // Map "<compId>:<portName>" -> FluidSIM port object ID
   const portObjIdMap = new Map<string, number>();
+  const portObjMeta = new Map<
+    number,
+    { blockIdx: number; parentId: number; cls: string; cx: number; cy: number; hidden: boolean; hasL: boolean }
+  >();
+  const routingPorts = new Map<number, CtRoutingPort>();
+  const routingObstacles: CtRoutingObstacle[] = [];
+  const occupiedManifoldSliceXs: number[] = [];
+  const occupiedElecSliceXsByY: Array<{ x: number; y: number }> = [];
+  const manifoldBridges: Array<{ pA: number; pB: number }> = [];
+  const elecRailBridges: Array<{ pA: number; pB: number }> = [];
+  const edgePortOverride = new Map<string, number>();
 
   for (const comp of workingDoc.components) {
     if (embeddedTerminatorCompIds.has(comp.id)) continue;
@@ -1952,6 +1998,22 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     const flip = comp.layout?.flipped ? 1 : 0;
 
     occupiedRects.push({ x1, y1, x2, y2 });
+    if (comp.type !== 'pneumatic_manifold') {
+      const obsX2 =
+        comp.type === 'cylinder_double_acting' || comp.type === 'cylinder_single_acting'
+          ? x2 + 46080
+          : comp.type === 'pressure_switch_differential'
+            ? x2 + 24576
+            : x2;
+      routingObstacles.push({
+        ownerId: parentId,
+        cls: comp.type,
+        x1,
+        y1,
+        x2: obsX2,
+        y2,
+      });
+    }
 
     const catDef = getCatalogComponent(comp.type);
     const isPneumaticLabeled =
@@ -2002,8 +2064,12 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         `${cls} O${pid} ${px1} ${py1} ${px2} ${py2} 0 0 348163`,
         ...extraProps,
       ];
+      const blockIdx = objectBlocks.length;
       objectBlocks.push(lines.join('\n'));
       gateLines.push(`gate${gateNum} # ${parentId} ${pid}`);
+      const hidden = extraProps.some((p) => p.includes('S state INT 4'));
+      portObjMeta.set(pid, { blockIdx, parentId, cls, cx, cy, hidden, hasL: false });
+      routingPorts.set(pid, { objId: pid, parentId, cls, cx, cy, hidden });
       if (portName) {
         portObjIdMap.set(`${comp.id}:${portName}`, pid);
       }
@@ -2049,6 +2115,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       const drX2 = x1 + 36864;
       const drY2 = y1 - 17408;
       occupiedRects.push({ x1: drX1, y1: drY1, x2: drX2, y2: drY2 });
+      routingObstacles.push({ ownerId: drId, cls: 'R_SCHALT', x1: drX1, y1: drY1, x2: drX2, y2: drY2 });
       const drLines = [
         `R_SCHALT O${drId} ${drX1} ${drY1} ${drX2} ${drY2} 0 0 4253703`,
         ` S _MCP_OWNER_ID S ${ownerComp.id}`,
@@ -2162,20 +2229,101 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         objectBlocks.push(
           [`PTriconnection O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4311043`, idProp].join('\n'),
         );
+        const juncEdges = workingDoc.connections.filter(
+          (e) =>
+            !embeddedTerminatorEdgeIds.has(e.id) &&
+            (e.from.componentId === comp.id || e.to.componentId === comp.id),
+        );
         for (let g = 1; g <= 4; g++) {
-          addPortObj(g, 'PConnection', String(g), pPortProps(String(g)));
+          const edge = juncEdges[g - 1];
+          if (edge) {
+            const side: 'from' | 'to' = edge.from.componentId === comp.id ? 'from' : 'to';
+            const origPort = side === 'from' ? edge.from.port : edge.to.port;
+            const pid = addPortObj(g, 'PConnection', String(g), [
+              ...pPortProps(origPort),
+              ` S _MCP_ELEC_RAIL_PORT S ${origPort}`,
+            ]);
+            edgePortOverride.set(`${edge.id}:${side}`, pid);
+          } else {
+            const pName = String(g);
+            const props = pPortProps(pName);
+            const hasTerminator =
+              embeddedExhaustByPort.has(`${comp.id}:${pName}`) ||
+              embeddedPlugByPort.has(`${comp.id}:${pName}`);
+            if (!hasTerminator) {
+              props.push(' S state INT 4');
+            }
+            addPortObj(g, 'PConnection', pName, props);
+          }
         }
         break;
       }
       case 'pneumatic_manifold': {
         // FluidSIM 4.5 C++ loader requires EVERY PTriconnection to have EXACTLY 4 PConnection gates
-        // (fewer than 4 gates crashes fl_sim_p.exe with 0xC0000005).
-        // Represent an 8-port manifold as 3 chained 4-gate PTriconnection slices spanning 122880 x 12288 (40 x 4 mm):
-        //   Slice 0 (x1 .. x1+12288): gates 1..3 -> ports '1','2','3'; gate 4 -> bridge to Slice 1
-        //   Slice 1 (x1+55296 .. x1+67584): gate 1 -> bridge; gates 2..3 -> ports '4','5'; gate 4 -> bridge to Slice 2
-        //   Slice 2 (x1+110592 .. x1+122880): gate 1 -> bridge; gates 2..4 -> ports '6','7','8'
+        // centered at (sliceX1 + 6144, y1 + 6144). Align one 4-gate slice directly beneath each connected
+        // riser port so vertical supply/exhaust risers drop cleanly straight down with zero horizontal jogs.
         const busRole = String(comp.params.busRole ?? 'supply');
-        const sliceStep = 55296; // 18 mm horizontal spacing between chained manifold nodes
+        const centerY = y1 + 6144;
+
+        // Collect external connections targeting ports '2'..'7' (and non-terminator '1'/'8')
+        const riserItems: Array<{ portName: string; targetX: number }> = [];
+        for (const pName of ['2', '3', '4', '5', '6', '7']) {
+          const edge = workingDoc.connections.find(
+            (e) =>
+              !embeddedTerminatorEdgeIds.has(e.id) &&
+              ((e.from.componentId === comp.id && e.from.port === pName) ||
+                (e.to.componentId === comp.id && e.to.port === pName)),
+          );
+          if (!edge) continue;
+          const otherId = edge.from.componentId === comp.id ? edge.to.componentId : edge.from.componentId;
+          const otherPort = edge.from.componentId === comp.id ? edge.to.port : edge.from.port;
+          const otherComp = compById.get(otherId);
+          if (!otherComp?.layout) continue;
+          const off = getEffectivePortOffset(otherComp, otherPort);
+          riserItems.push({
+            portName: pName,
+            targetX: Math.round((otherComp.layout.x + off.x) * FS_UNIT_PER_MM),
+          });
+        }
+        riserItems.sort((a, b) => a.targetX - b.targetX);
+
+        // Fallback if manifold has <= 1 risers: keep canonical 3-slice layout
+        const minSliceGap = 24576; // 8 mm minimum spacing between PTriconnection centers
+        const maxRightRaw = Math.round(
+          ((workingDoc.metadata.sheetWidthMm >= 400 ? 350 : 250) * FS_UNIT_PER_MM),
+        );
+
+        const slicePlans: Array<{ sliceX1: number; ports: Array<string | undefined> }> = [];
+        if (riserItems.length >= 2) {
+          let cursorX = x1;
+          for (let i = 0; i < riserItems.length; i++) {
+            const item = riserItems[i];
+            let desiredX1 = Math.min(maxRightRaw - 12288, Math.max(cursorX, item.targetX - 6144));
+            while (
+              occupiedManifoldSliceXs.some((ox) => Math.abs(desiredX1 + 6144 - ox) < 15360) &&
+              desiredX1 + 15360 <= maxRightRaw - 12288
+            ) {
+              desiredX1 += 15360;
+            }
+            if (i === 0) {
+              // Slice 0 carries port '1' on gate1, first riser on gate2, unused on gate3, bridgeOut on gate4
+              slicePlans.push({ sliceX1: desiredX1, ports: ['1', item.portName, undefined, undefined] });
+            } else if (i === riserItems.length - 1) {
+              // Last slice carries bridgeIn on gate1, last riser on gate2, unused on gate3, port '8' on gate4
+              slicePlans.push({ sliceX1: desiredX1, ports: [undefined, item.portName, undefined, '8'] });
+            } else {
+              slicePlans.push({ sliceX1: desiredX1, ports: [undefined, item.portName, undefined, undefined] });
+            }
+            cursorX = desiredX1 + minSliceGap;
+          }
+          // Ensure any remaining unreferenced ports ('2'..'7') still map if someone queries them
+        } else {
+          slicePlans.push(
+            { sliceX1: x1, ports: ['1', '2', '3', undefined] },
+            { sliceX1: x1 + 55296, ports: [undefined, '4', '5', undefined] },
+            { sliceX1: x1 + 110592, ports: [undefined, '6', '7', '8'] },
+          );
+        }
 
         const addSlicePort = (
           sliceParentId: number,
@@ -2190,8 +2338,27 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
           const py1 = rawCy - 5120;
           const px2 = rawCx + 5120;
           const py2 = rawCy + 5120;
+          const blockIdx = objectBlocks.length;
           objectBlocks.push([`PConnection O${pid} ${px1} ${py1} ${px2} ${py2} 0 0 348163`, ...extraProps].join('\n'));
           gateLines.push(`gate${gateNum} # ${sliceParentId} ${pid}`);
+          const hidden = extraProps.some((p) => p.includes('S state INT 4'));
+          portObjMeta.set(pid, {
+            blockIdx,
+            parentId: sliceParentId,
+            cls: 'PConnection',
+            cx: rawCx,
+            cy: rawCy,
+            hidden,
+            hasL: false,
+          });
+          routingPorts.set(pid, {
+            objId: pid,
+            parentId: sliceParentId,
+            cls: 'PConnection',
+            cx: rawCx,
+            cy: rawCy,
+            hidden,
+          });
           if (portName) {
             portObjIdMap.set(`${comp.id}:${portName}`, pid);
           }
@@ -2205,80 +2372,65 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
           ...(sliceIdx === 0 ? labelProp : []),
         ];
 
-        // Slice 0 (parentId already allocated immediately before switch)
-        objectBlocks.push(
-          [`PTriconnection O${parentId} ${x1} ${y1} ${x1 + 12288} ${y1 + 12288} ${rot} ${flip} 4311043`, ...sliceMeta(0)].join(
-            '\n',
-          ),
-        );
-        addSlicePort(parentId, 1, x1, y1 + 6144, '1', [...pPortProps('1'), ' S _MCP_MANIFOLD_PORT S 1']);
-        addSlicePort(parentId, 2, x1 + 6144, y1, '2', [...pPortProps('2'), ' S _MCP_MANIFOLD_PORT S 2']);
-        addSlicePort(parentId, 3, x1 + 6144, y1 + 12288, '3', [...pPortProps('3'), ' S _MCP_MANIFOLD_PORT S 3']);
-        const s0BridgeOut = addSlicePort(parentId, 4, x1 + 12288, y1 + 6144, undefined, [
+        const unusedPortProps = [
           ' S ex_type_FEST B T',
           ' S ex_type S EX0',
           ' S R_H_FEST B T',
           ' S R_H F 0',
-        ]);
+          ' S state INT 4',
+        ];
+        const bridgePortProps = [
+          ' S ex_type_FEST B T',
+          ' S ex_type S EX0',
+          ' S R_H_FEST B T',
+          ' S R_H F 0',
+        ];
 
-        // Slice 1 (allocate objId right before pushing to preserve strict 0-based object array indexing!)
-        const slice1Id = allocObjId();
-        const s1x1 = x1 + sliceStep;
-        objectBlocks.push(
-          [
-            `PTriconnection O${slice1Id} ${s1x1} ${y1} ${s1x1 + 12288} ${y1 + 12288} ${rot} ${flip} 4311043`,
-            ...sliceMeta(1),
-          ].join('\n'),
-        );
-        const s1BridgeIn = addSlicePort(slice1Id, 1, s1x1, y1 + 6144, undefined, [
-          ' S ex_type_FEST B T',
-          ' S ex_type S EX0',
-          ' S R_H_FEST B T',
-          ' S R_H F 0',
-        ]);
-        addSlicePort(slice1Id, 2, s1x1 + 6144, y1, '4', [...pPortProps('4'), ' S _MCP_MANIFOLD_PORT S 4']);
-        addSlicePort(slice1Id, 3, s1x1 + 6144, y1 + 12288, '5', [...pPortProps('5'), ' S _MCP_MANIFOLD_PORT S 5']);
-        const s1BridgeOut = addSlicePort(slice1Id, 4, s1x1 + 12288, y1 + 6144, undefined, [
-          ' S ex_type_FEST B T',
-          ' S ex_type S EX0',
-          ' S R_H_FEST B T',
-          ' S R_H F 0',
-        ]);
+        let prevBridgeOut: number | undefined;
+        for (let sIdx = 0; sIdx < slicePlans.length; sIdx++) {
+          const sp = slicePlans[sIdx];
+          const sObjId = sIdx === 0 ? parentId : allocObjId();
+          const cx = sp.sliceX1 + 6144;
+          occupiedManifoldSliceXs.push(cx);
+          occupiedRects.push({ x1: sp.sliceX1, y1, x2: sp.sliceX1 + 12288, y2: y1 + 12288 });
+          routingObstacles.push({
+            ownerId: sObjId,
+            cls: 'PTriconnection',
+            x1: sp.sliceX1,
+            y1,
+            x2: sp.sliceX1 + 12288,
+            y2: y1 + 12288,
+          });
+          objectBlocks.push(
+            [
+              `PTriconnection O${sObjId} ${sp.sliceX1} ${y1} ${sp.sliceX1 + 12288} ${y1 + 12288} ${rot} ${flip} 4311043`,
+              ...sliceMeta(sIdx),
+            ].join('\n'),
+          );
 
-        // Slice 2 (allocate objId right before pushing to preserve strict 0-based object array indexing!)
-        const slice2Id = allocObjId();
-        const s2x1 = x1 + sliceStep * 2;
-        objectBlocks.push(
-          [
-            `PTriconnection O${slice2Id} ${s2x1} ${y1} ${s2x1 + 12288} ${y1 + 12288} ${rot} ${flip} 4311043`,
-            ...sliceMeta(2),
-          ].join('\n'),
-        );
-        const s2BridgeIn = addSlicePort(slice2Id, 1, s2x1, y1 + 6144, undefined, [
-          ' S ex_type_FEST B T',
-          ' S ex_type S EX0',
-          ' S R_H_FEST B T',
-          ' S R_H F 0',
-        ]);
-        addSlicePort(slice2Id, 2, s2x1 + 6144, y1, '6', [...pPortProps('6'), ' S _MCP_MANIFOLD_PORT S 6']);
-        addSlicePort(slice2Id, 3, s2x1 + 6144, y1 + 12288, '7', [...pPortProps('7'), ' S _MCP_MANIFOLD_PORT S 7']);
-        addSlicePort(slice2Id, 4, s2x1 + 12288, y1 + 6144, '8', [...pPortProps('8'), ' S _MCP_MANIFOLD_PORT S 8']);
-
-        // Internal manifold bridge PLine connections (ignored when reparsing semantic graph)
-        connectionBlocks.push(
-          [
-            `CON PLine ${s0BridgeOut} ${s1BridgeIn}`,
-            `L ${x1 + 12288} ${y1 + 6144} ${s1x1} ${y1 + 6144}`,
-            ' S _MCP_MANIFOLD_LINK B T',
-          ].join('\n'),
-        );
-        connectionBlocks.push(
-          [
-            `CON PLine ${s1BridgeOut} ${s2BridgeIn}`,
-            `L ${s1x1 + 12288} ${y1 + 6144} ${s2x1} ${y1 + 6144}`,
-            ' S _MCP_MANIFOLD_LINK B T',
-          ].join('\n'),
-        );
+          let curBridgeOut: number | undefined;
+          for (let g = 1; g <= 4; g++) {
+            const pName = sp.ports[g - 1];
+            const isBridgeIn = sIdx > 0 && g === 1;
+            const isBridgeOut = sIdx < slicePlans.length - 1 && g === 4;
+            if (isBridgeIn) {
+              const bIn = addSlicePort(sObjId, g, cx, centerY, undefined, bridgePortProps);
+              if (prevBridgeOut !== undefined) {
+                manifoldBridges.push({ pA: prevBridgeOut, pB: bIn });
+              }
+            } else if (isBridgeOut) {
+              curBridgeOut = addSlicePort(sObjId, g, cx, centerY, undefined, bridgePortProps);
+            } else if (pName) {
+              addSlicePort(sObjId, g, cx, centerY, pName, [
+                ...pPortProps(pName),
+                ` S _MCP_MANIFOLD_PORT S ${pName}`,
+              ]);
+            } else {
+              addSlicePort(sObjId, g, cx, centerY, undefined, unusedPortProps);
+            }
+          }
+          prevBridgeOut = curBridgeOut;
+        }
         break;
       }
       case 'vacuum_suction_nozzle': {
@@ -2829,26 +2981,195 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         }
         break;
       }
-      case 'power_24v': {
-        objectBlocks.push(
-          [`pol2 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4126728`, idProp].join('\n'),
-        );
-        addPortObj(1, 'EConnection', 'OUT');
-        break;
-      }
-      case 'power_0v': {
-        objectBlocks.push(
-          [`pol1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 184328`, idProp].join('\n'),
-        );
-        addPortObj(1, 'EConnection', 'IN');
-        break;
-      }
+      case 'power_24v':
+      case 'power_0v':
       case 'electrical_junction': {
-        objectBlocks.push(
-          [`ETriconnection O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4321283`, idProp].join('\n'),
+        const compEdges = workingDoc.connections.filter(
+          (e) =>
+            !embeddedTerminatorEdgeIds.has(e.id) &&
+            (e.from.componentId === comp.id || e.to.componentId === comp.id),
         );
-        for (let g = 1; g <= 4; g++) {
-          addPortObj(g, 'EConnection', String(g));
+        const needElecRail =
+          comp.type === 'electrical_junction' ? compEdges.length >= 3 : compEdges.length >= 2;
+
+        if (!needElecRail) {
+          if (comp.type === 'power_24v') {
+            objectBlocks.push(
+              [`pol2 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4126728`, idProp].join('\n'),
+            );
+            addPortObj(1, 'EConnection', 'OUT', [], { x: 18432, y: 6144 });
+          } else if (comp.type === 'power_0v') {
+            objectBlocks.push(
+              [`pol1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 184328`, idProp].join('\n'),
+            );
+            addPortObj(1, 'EConnection', 'IN', [], { x: 18432, y: 6144 });
+          } else {
+            objectBlocks.push(
+              [`ETriconnection O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4321283`, idProp].join('\n'),
+            );
+            for (let g = 1; g <= 4; g++) {
+              const pName = String(g);
+              addPortObj(g, 'EConnection', pName, isPortWired(pName) ? [] : [' S state INT 4']);
+            }
+          }
+          break;
+        }
+
+        let startBridgePortId: number | undefined;
+        let railCenterY = y1 + 6144;
+        let railStartX = x1;
+
+        if (comp.type === 'power_24v') {
+          objectBlocks.push(
+            [`pol2 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4126728`, idProp].join('\n'),
+          );
+          startBridgePortId = addPortObj(1, 'EConnection', 'OUT', [], { x: 18432, y: 6144 });
+          railCenterY = portObjMeta.get(startBridgePortId)!.cy;
+          railStartX = x2 + 12288;
+        } else if (comp.type === 'power_0v') {
+          objectBlocks.push(
+            [`pol1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 184328`, idProp].join('\n'),
+          );
+          startBridgePortId = addPortObj(1, 'EConnection', 'IN', [], { x: 18432, y: 6144 });
+          railCenterY = portObjMeta.get(startBridgePortId)!.cy;
+          railStartX = x2 + 12288;
+        }
+
+        const railItems = compEdges
+          .map((e) => {
+            const side: 'from' | 'to' = e.from.componentId === comp.id ? 'from' : 'to';
+            const origPort = side === 'from' ? e.from.port : e.to.port;
+            const otherId = side === 'from' ? e.to.componentId : e.from.componentId;
+            const otherPort = side === 'from' ? e.to.port : e.from.port;
+            const otherComp = compById.get(otherId);
+            const off = otherComp ? getEffectivePortOffset(otherComp, otherPort) : { x: 0, y: 0 };
+            const targetX = otherComp?.layout
+              ? Math.round((otherComp.layout.x + off.x) * FS_UNIT_PER_MM)
+              : railStartX;
+            return { edgeId: e.id, side, origPort, targetX };
+          })
+          .sort((a, b) => a.targetX - b.targetX || a.edgeId.localeCompare(b.edgeId));
+
+        const maxRailRightRaw =
+          (workingDoc.metadata.sheetWidthMm > 300 || workingDoc.metadata.sheetHeightMm > 220 ? 1105920 : 819200) -
+          12288;
+        const minRailGap = 15360;
+        if (comp.type === 'electrical_junction') {
+          const bandHitsOccupied = (cy: number): boolean => {
+            const ry1 = cy - 6144;
+            const ry2 = cy + 6144;
+            if (occupiedElecSliceXsByY.some((occ) => Math.abs(occ.y - cy) < 15360)) return true;
+            return occupiedRects.some(
+              (r) =>
+                !(r.x1 === x1 && r.y1 === y1 && r.x2 === x2 && r.y2 === y2) &&
+                r.x2 > railStartX &&
+                r.x1 < maxRailRightRaw + 12288 &&
+                r.y1 < ry2 + 2048 &&
+                r.y2 + 2048 > ry1,
+            );
+          };
+          while (railCenterY > 98304 && bandHitsOccupied(railCenterY)) {
+            railCenterY -= 15360;
+          }
+        }
+        const railSliceY1 = railCenterY - 6144;
+        const minNeededSpan = Math.max(0, (railItems.length - 1) * minRailGap);
+        let cursorX = Math.min(railStartX, Math.max(4096, maxRailRightRaw - minNeededSpan));
+
+        const addElecRailSlicePort = (
+          sliceParentId: number,
+          gateNum: number,
+          rawCx: number,
+          rawCy: number,
+          extraProps: string[] = [],
+        ): number => {
+          const pid = allocObjId();
+          const px1 = rawCx - 5120;
+          const py1 = rawCy - 5120;
+          const px2 = rawCx + 5120;
+          const py2 = rawCy + 5120;
+          const blockIdx = objectBlocks.length;
+          objectBlocks.push([`EConnection O${pid} ${px1} ${py1} ${px2} ${py2} 0 0 348163`, ...extraProps].join('\n'));
+          gateLines.push(`gate${gateNum} # ${sliceParentId} ${pid}`);
+          const hidden = extraProps.some((p) => p.includes('S state INT 4'));
+          portObjMeta.set(pid, {
+            blockIdx,
+            parentId: sliceParentId,
+            cls: 'EConnection',
+            cx: rawCx,
+            cy: rawCy,
+            hidden,
+            hasL: false,
+          });
+          routingPorts.set(pid, {
+            objId: pid,
+            parentId: sliceParentId,
+            cls: 'EConnection',
+            cx: rawCx,
+            cy: rawCy,
+            hidden,
+          });
+          return pid;
+        };
+
+        let prevBridgeOut = startBridgePortId;
+        for (let sIdx = 0; sIdx < railItems.length; sIdx++) {
+          const item = railItems[sIdx];
+          const remainingAfter = railItems.length - 1 - sIdx;
+          const maxForThisSlice = maxRailRightRaw - remainingAfter * minRailGap;
+          let sliceX1 = Math.max(cursorX, Math.min(maxForThisSlice, item.targetX - 6144));
+          while (
+            occupiedElecSliceXsByY.some(
+              (occ) => Math.abs(occ.y - railCenterY) < 15360 && Math.abs(occ.x - (sliceX1 + 6144)) < 15360,
+            ) &&
+            sliceX1 + 15360 <= maxForThisSlice
+          ) {
+            sliceX1 += 15360;
+          }
+          const sObjId = comp.type === 'electrical_junction' && sIdx === 0 ? parentId : allocObjId();
+          const cx = sliceX1 + 6144;
+          occupiedElecSliceXsByY.push({ x: cx, y: railCenterY });
+          occupiedRects.push({ x1: sliceX1, y1: railSliceY1, x2: sliceX1 + 12288, y2: railSliceY1 + 12288 });
+          routingObstacles.push({
+            ownerId: sObjId,
+            cls: 'ETriconnection',
+            x1: sliceX1,
+            y1: railSliceY1,
+            x2: sliceX1 + 12288,
+            y2: railSliceY1 + 12288,
+          });
+          objectBlocks.push(
+            [
+              `ETriconnection O${sObjId} ${sliceX1} ${railSliceY1} ${sliceX1 + 12288} ${railSliceY1 + 12288} 0 0 4321283`,
+              ` S _MCP_ELEC_RAIL_OWNER S ${comp.id}`,
+              ` S _MCP_ELEC_RAIL_TYPE S ${comp.type}`,
+              ` S _MCP_ELEC_RAIL_SLICE I ${sIdx}`,
+            ].join('\n'),
+          );
+
+          const hasBridgeIn = prevBridgeOut !== undefined;
+          if (hasBridgeIn) {
+            const bIn = addElecRailSlicePort(sObjId, 1, cx, railCenterY);
+            elecRailBridges.push({ pA: prevBridgeOut!, pB: bIn });
+          } else {
+            addElecRailSlicePort(sObjId, 1, cx, railCenterY, [' S state INT 4']);
+          }
+
+          const tapPid = addElecRailSlicePort(sObjId, 2, cx, railCenterY, [
+            ` S _MCP_ELEC_RAIL_PORT S ${item.origPort}`,
+          ]);
+          edgePortOverride.set(`${item.edgeId}:${item.side}`, tapPid);
+
+          addElecRailSlicePort(sObjId, 3, cx, railCenterY, [' S state INT 4']);
+
+          if (sIdx < railItems.length - 1) {
+            prevBridgeOut = addElecRailSlicePort(sObjId, 4, cx, railCenterY);
+          } else {
+            addElecRailSlicePort(sObjId, 4, cx, railCenterY, [' S state INT 4']);
+            prevBridgeOut = undefined;
+          }
+
+          cursorX = sliceX1 + minRailGap;
         }
         break;
       }
@@ -2859,8 +3180,8 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             '\n',
           ),
         );
-        addPortObj(1, 'EConnection', '13');
-        addPortObj(2, 'EConnection', '14');
+        addPortObj(1, 'EConnection', '13', [], { x: 15360, y: 0 });
+        addPortObj(2, 'EConnection', '14', [], { x: 15360, y: 30720 });
         break;
       }
       case 'pushbutton_nc': {
@@ -2873,8 +3194,8 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             ...elecLabelProp,
           ].join('\n'),
         );
-        addPortObj(1, 'EConnection', '11');
-        addPortObj(2, 'EConnection', '12');
+        addPortObj(1, 'EConnection', '11', [], { x: 15360, y: 0 });
+        addPortObj(2, 'EConnection', '12', [], { x: 15360, y: 30720 });
         break;
       }
       case 'relay_contact_no':
@@ -2888,8 +3209,8 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             ...elecLabelProp,
           ].join('\n'),
         );
-        addPortObj(1, 'EConnection', '13');
-        addPortObj(2, 'EConnection', '14');
+        addPortObj(1, 'EConnection', '13', [], { x: 10240, y: 0 });
+        addPortObj(2, 'EConnection', '14', [], { x: 10240, y: 30720 });
         break;
       }
       case 'relay_contact_nc':
@@ -2903,8 +3224,8 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             ...elecLabelProp,
           ].join('\n'),
         );
-        addPortObj(1, 'EConnection', '11');
-        addPortObj(2, 'EConnection', '12');
+        addPortObj(1, 'EConnection', '11', [], { x: 10240, y: 0 });
+        addPortObj(2, 'EConnection', '12', [], { x: 10240, y: 30720 });
         break;
       }
       case 'relay_coil': {
@@ -2913,8 +3234,8 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             '\n',
           ),
         );
-        addPortObj(1, 'EConnection', 'A1');
-        addPortObj(2, 'EConnection', 'A2');
+        addPortObj(1, 'EConnection', 'A1', [], { x: 12288, y: 0 });
+        addPortObj(2, 'EConnection', 'A2', [], { x: 12288, y: 30720 });
         break;
       }
       case 'timer_relay_on_delay': {
@@ -2957,8 +3278,8 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             '\n',
           ),
         );
-        addPortObj(1, 'EConnection', 'A1');
-        addPortObj(2, 'EConnection', 'A2');
+        addPortObj(1, 'EConnection', 'A1', [], { x: 12288, y: 0 });
+        addPortObj(2, 'EConnection', 'A2', [], { x: 12288, y: 30720 });
         break;
       }
       case 'indicator_lamp': {
@@ -3260,34 +3581,181 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     }
   }
 
-  // Emit CON PLine / CON ELine edges (with orthogonal L polyline segments when routed)
+  const normalizeOrthogonalRawPts = (
+    rawPts: Array<{ x: number; y: number }>,
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number,
+  ): Array<{ x: number; y: number }> => {
+    const pts = rawPts.map((p) => ({ x: p.x, y: p.y }));
+    if (pts.length < 2) {
+      if (ax === bx || ay === by) return [{ x: ax, y: ay }, { x: bx, y: by }];
+      const midY = Math.round((ay + by) / 2);
+      return [
+        { x: ax, y: ay },
+        { x: ax, y: midY },
+        { x: bx, y: midY },
+        { x: bx, y: by },
+      ];
+    }
+    // Snap endpoints cleanly to true port centers while preserving orthogonality
+    if (pts.length >= 3) {
+      if (pts[0].x === pts[1].x) pts[1].x = ax;
+      else if (pts[0].y === pts[1].y) pts[1].y = ay;
+      const last = pts.length - 1;
+      if (pts[last].x === pts[last - 1].x) pts[last - 1].x = bx;
+      else if (pts[last].y === pts[last - 1].y) pts[last - 1].y = by;
+    }
+    pts[0] = { x: ax, y: ay };
+    pts[pts.length - 1] = { x: bx, y: by };
+
+    // Ensure every consecutive pair is strictly horizontal or vertical
+    const ortho: Array<{ x: number; y: number }> = [pts[0]];
+    for (let i = 1; i < pts.length; i++) {
+      const prev = ortho[ortho.length - 1];
+      const cur = pts[i];
+      if (prev.x === cur.x && prev.y === cur.y) continue;
+      if (prev.x !== cur.x && prev.y !== cur.y) {
+        ortho.push({ x: cur.x, y: prev.y });
+      }
+      ortho.push(cur);
+    }
+
+    // Merge collinear consecutive points
+    const merged: Array<{ x: number; y: number }> = [];
+    for (const p of ortho) {
+      if (merged.length >= 2) {
+        const a = merged[merged.length - 2];
+        const b = merged[merged.length - 1];
+        if ((a.x === b.x && b.x === p.x) || (a.y === b.y && b.y === p.y)) {
+          merged[merged.length - 1] = p;
+          continue;
+        }
+      }
+      merged.push(p);
+    }
+    return merged;
+  };
+
+  const injectPortLSegments = (portId: number, absPts: Array<{ x: number; y: number }>): boolean => {
+    const meta = portObjMeta.get(portId);
+    if (!meta || meta.hasL || absPts.length < 2) return false;
+    const lLines: string[] = [];
+    for (let i = 0; i < absPts.length - 1; i++) {
+      const sx = absPts[i].x - meta.cx;
+      const sy = absPts[i].y - meta.cy;
+      const ex = absPts[i + 1].x - meta.cx;
+      const ey = absPts[i + 1].y - meta.cy;
+      if (sx === ex && sy === ey) continue;
+      lLines.push(`L ${sx + 5120} ${sy + 5120} ${ex - 5120} ${ey - 5120}`);
+    }
+    if (lLines.length === 0) return false;
+    const blockLines = objectBlocks[meta.blockIdx].split('\n');
+    blockLines.splice(1, 0, ...lLines);
+    objectBlocks[meta.blockIdx] = blockLines.join('\n');
+    meta.hasL = true;
+    return true;
+  };
+
+  // Route all manifold bridges + external connections in ground-truth FluidSIM coordinates using orthogonal A*
+  const routingEdges: CtRoutingEdge[] = [];
+  const activeEdges: Array<{ edge: ConnectionEdge; pA: number; pB: number; key: string }> = [];
+
+  for (let i = 0; i < manifoldBridges.length; i++) {
+    const br = manifoldBridges[i];
+    routingEdges.push({
+      key: `bridge:${i}`,
+      fromPortId: br.pA,
+      toPortId: br.pB,
+      isManifoldBridge: true,
+    });
+  }
+
+  for (let i = 0; i < elecRailBridges.length; i++) {
+    const br = elecRailBridges[i];
+    routingEdges.push({
+      key: `ebridge:${i}`,
+      fromPortId: br.pA,
+      toPortId: br.pB,
+      isManifoldBridge: true,
+    });
+  }
+
   for (const edge of workingDoc.connections) {
     if (embeddedTerminatorEdgeIds.has(edge.id)) continue;
-    const pA = portObjIdMap.get(`${edge.from.componentId}:${edge.from.port}`);
-    const pB = portObjIdMap.get(`${edge.to.componentId}:${edge.to.port}`);
+    const pA =
+      edgePortOverride.get(`${edge.id}:from`) ??
+      portObjIdMap.get(`${edge.from.componentId}:${edge.from.port}`);
+    const pB =
+      edgePortOverride.get(`${edge.id}:to`) ??
+      portObjIdMap.get(`${edge.to.componentId}:${edge.to.port}`);
     if (pA === undefined || pB === undefined) continue;
-    const conKind = edge.domain === 'pneumatic' ? 'PLine' : 'ELine';
-    const conLines = [`CON ${conKind} ${pA} ${pB}`];
-    if (edge.waypoints && edge.waypoints.length >= 2) {
-      for (let w = 0; w < edge.waypoints.length - 1; w++) {
-        const a = edge.waypoints[w];
-        const b = edge.waypoints[w + 1];
-        conLines.push(
-          `L ${Math.round(a.x * FS_UNIT_PER_MM)} ${Math.round(a.y * FS_UNIT_PER_MM)} ${Math.round(b.x * FS_UNIT_PER_MM)} ${Math.round(b.y * FS_UNIT_PER_MM)}`,
-        );
-      }
+    const key = `edge:${edge.id}`;
+    routingEdges.push({
+      key,
+      fromPortId: pA,
+      toPortId: pB,
+    });
+    activeEdges.push({ edge, pA, pB, key });
+  }
+
+  const routedPaths = routeCtConnections({
+    bounds: getFluidSimPrintableBounds(workingDoc.metadata.sheetWidthMm, workingDoc.metadata.sheetHeightMm),
+    obstacles: routingObstacles,
+    ports: routingPorts,
+    edges: routingEdges,
+  });
+
+  // Emit internal manifold slice bridges using native PConnection L segments
+  for (let i = 0; i < manifoldBridges.length; i++) {
+    const br = manifoldBridges[i];
+    const pts = routedPaths.get(`bridge:${i}`);
+    if (pts && !injectPortLSegments(br.pA, pts)) {
+      injectPortLSegments(br.pB, [...pts].reverse());
     }
-    conLines.push(` S _MCP_EDGE_ID S ${edge.id}`);
-    connectionBlocks.push(conLines.join('\n'));
+    connectionBlocks.push(
+      [`CON PLine ${br.pA} ${br.pB}`, ' S COLOR I 0', ' S Style I 2', ' S _MCP_MANIFOLD_LINK B T'].join('\n'),
+    );
+  }
+
+  // Emit internal electrical rail slice bridges using native EConnection L segments
+  for (let i = 0; i < elecRailBridges.length; i++) {
+    const br = elecRailBridges[i];
+    const pts = routedPaths.get(`ebridge:${i}`);
+    if (pts && !injectPortLSegments(br.pA, pts)) {
+      injectPortLSegments(br.pB, [...pts].reverse());
+    }
+    connectionBlocks.push(
+      [`CON ELine ${br.pA} ${br.pB}`, ' S COLOR I 0', ' S Style I 2', ' S _MCP_MANIFOLD_LINK B T'].join('\n'),
+    );
+  }
+
+  // Emit CON PLine / CON ELine edges and attach orthogonal L segments to their PConnection/EConnection
+  for (const item of activeEdges) {
+    const { edge, pA, pB, key } = item;
+    const pts = routedPaths.get(key);
+    if (pts && !injectPortLSegments(pA, pts)) {
+      injectPortLSegments(pB, [...pts].reverse());
+    }
+    const conKind = edge.domain === 'pneumatic' ? 'PLine' : 'ELine';
+    connectionBlocks.push(
+      [`CON ${conKind} ${pA} ${pB}`, ' S COLOR I 0', ' S Style I 2', ` S _MCP_EDGE_ID S ${edge.id}`].join('\n'),
+    );
   }
 
   const ctBody = [...objectBlocks, '0 0 0 # 0 0 0 0 0 0', ...gateLines, ...connectionBlocks].join('\n');
   const trailerText = symAlloc.renderTrailer();
 
+  const shouldUpgradeA4Header =
+    hasPreservedCt &&
+    (workingDoc.metadata.sheetWidthMm > 300 || workingDoc.metadata.sheetHeightMm > 220) &&
+    isDefaultA4Header(preserved.headerLinesB64);
+
   return {
     ...(hasPreservedCt
       ? {
-          headerLinesB64: preserved.headerLinesB64,
+          ...(!shouldUpgradeA4Header ? { headerLinesB64: preserved.headerLinesB64 } : {}),
           profile: preserved.profile,
           previewBlockB64: preserved.previewBlockB64,
           ...(preserved.fsPreviewBlock !== undefined ? { fsPreviewBlock: preserved.fsPreviewBlock } : {}),
@@ -3337,6 +3805,7 @@ export interface CtVisualLayoutInvariantReport {
   negativeCoordObjects: Array<{ cls: string; objId: number; x1: number; y1: number }>;
   titleCollisions: Array<{ cls: string; objId: number; y1: number; titleY2: number }>;
   overlaps: Array<{ a: string; b: string }>;
+  wireGeometry: CtWireGeometryReport;
 }
 
 const DXF_SYMBOL_REQUIRED_CLASSES = new Set([
@@ -3364,6 +3833,7 @@ const DXF_SYMBOL_REQUIRED_CLASSES = new Set([
 export function verifyCtVisualLayoutInvariants(
   ctBody: string,
   trailerText: string,
+  options?: { sheetWidthMm?: number; sheetHeightMm?: number },
 ): CtVisualLayoutInvariantReport {
   const ast = parseCtBodyAst(ctBody);
 
@@ -3448,19 +3918,23 @@ export function verifyCtVisualLayoutInvariants(
     }
   }
 
+  const wireGeometry = verifyCtWireGeometryInvariants(ctBody, options);
+
   return {
     ok:
       missingSymbols.length === 0 &&
       missingDxfPrimList.length === 0 &&
       negativeCoordObjects.length === 0 &&
       titleCollisions.length === 0 &&
-      overlaps.length === 0,
+      overlaps.length === 0 &&
+      wireGeometry.ok,
     symCount: symIds.size,
     missingSymbols,
     missingDxfPrimList,
     negativeCoordObjects,
     titleCollisions,
     overlaps,
+    wireGeometry,
   };
 }
 

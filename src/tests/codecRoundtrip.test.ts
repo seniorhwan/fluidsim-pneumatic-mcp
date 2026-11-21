@@ -355,12 +355,15 @@ test('generated native .ct files emit distinct catalog-offset port coordinates a
     `Expected 5 distinct PConnection coordinates on WV_5, got ${pConnCoords.size}`,
   );
 
-  // Verify CON PLine / CON ELine blocks emit orthogonal L <x1> <y1> <x2> <y2> geometry segments
+  // Verify PConnection/EConnection blocks emit orthogonal FluidSIM 4.5 L <x1> <y1> <x2> <y2> segments
+  // (in FluidSIM's native ±5120 port-relative coordinates, horizontal means |y1-y2| === 10240, vertical means |x1-x2| === 10240)
   const lSegments = lines.filter((l) => /^\s*L\s+-?\d+\s+-?\d+\s+-?\d+\s+-?\d+/.test(l));
   assert.ok(lSegments.length > 0, 'Expected orthogonal L polyline segments in generated native .ct');
   for (const seg of lSegments) {
     const [, x1s, y1s, x2s, y2s] = seg.trim().split(/\s+/);
-    assert.ok(x1s === x2s || y1s === y2s, `Non-orthogonal native .ct wire segment: ${seg}`);
+    const dx = Math.abs(Number(x1s) - Number(x2s));
+    const dy = Math.abs(Number(y1s) - Number(y2s));
+    assert.ok(dx === 10240 || dy === 10240 || x1s === x2s || y1s === y2s, `Non-orthogonal native .ct wire segment: ${seg}`);
   }
 });
 

@@ -8,8 +8,9 @@ import { simulateCircuit } from '../simulator/simulator';
 import { serializeCircuitDocument } from '../codec/ctSerializer';
 import { parseCircuitBuffer } from '../codec/ctParser';
 import { verifyCodecRoundtrip } from '../codec/ctRoundtripGuard';
-import { decodeCtContainer, verifyCtPayloadLinearBounds } from '../codec/ctBinaryCodec';
+import { decodeCtContainer, isDefaultA4Header, verifyCtPayloadLinearBounds } from '../codec/ctBinaryCodec';
 import { verifyCtTextInvariants, verifyCtVisualLayoutInvariants } from '../codec/ctTextCodec';
+import { applyCircuitPatch } from '../authoring/patchEngine';
 
 function buildFestoDistributionStationCircuit(): CircuitDocument {
   const now = new Date().toISOString();
@@ -306,6 +307,12 @@ test('Festo MPS-C Distributing Station passes static validation (0 errors, 0 war
   assert.equal(visualInv.negativeCoordObjects.length, 0);
   assert.equal(visualInv.titleCollisions.length, 0);
   assert.equal(visualInv.overlaps.length, 0);
+  assert.equal(visualInv.wireGeometry.ok, true, `Wire geometry invariant failed: ${JSON.stringify(visualInv.wireGeometry)}`);
+  assert.equal(visualInv.wireGeometry.outOfBoundsObjects.length, 0);
+  assert.equal(visualInv.wireGeometry.outOfBoundsSegments.length, 0);
+  assert.equal(visualInv.wireGeometry.linesThroughComponents.length, 0);
+  assert.equal(visualInv.wireGeometry.linesThroughConnections.length, 0);
+  assert.equal(visualInv.wireGeometry.superimposedLines.length, 0);
 
   for (const cls of [
     'Wartungseinheit2 ',
@@ -446,4 +453,49 @@ test('Festo MPS-C Distributing Station simulates ejector cylinder, vacuum suctio
   assert.equal(sim.finalState.cylinders.SWIVEL_3A1?.unit, 'deg');
   assert.equal(sim.finalState.vacuum?.CUP_2A1?.gripped, false);
   assert.equal(sim.finalState.pressureSwitches?.PSW_2B1?.active, false);
+});
+
+test('Blank DIN A4 .ct circuit auto-promotes to DIN A3 and passes F6 wire geometry on patchEngine apply', () => {
+  const full = buildFestoDistributionStationCircuit();
+  const blankA4: CircuitDocument = {
+    schemaVersion: '1.0',
+    metadata: {
+      title: 'Auto-Promoted Distributing Station',
+      fluidsimVersion: '4.5',
+      format: 'fluidsim-4.5-ct',
+      sheetSize: 'DIN_A4_LANDSCAPE',
+      sheetDomain: 'pneumatic-only',
+      allowExternalElectricalSheet: true,
+      sheetWidthMm: 297,
+      sheetHeightMm: 210,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    components: [],
+    connections: [],
+  };
+
+  const blankBytes = serializeCircuitDocument(blankA4, { targetPath: 'auto_promo.ct' });
+  const { document: parsedBlank } = parseCircuitBuffer(blankBytes, 'auto_promo.ct');
+
+  const ops = [
+    ...full.components.map((c) => ({ op: 'add_component' as const, component: { ...c, layout: undefined } })),
+    ...full.connections.map((e) => ({ op: 'connect' as const, id: e.id, from: e.from, to: e.to })),
+  ];
+  const patched = applyCircuitPatch(parsedBlank, ops);
+  assert.equal(patched.document.metadata.sheetSize, 'DIN_A3_LANDSCAPE');
+  assert.equal(patched.document.metadata.sheetWidthMm, 420);
+  assert.equal(patched.document.metadata.sheetHeightMm, 297);
+
+  const outBytes = serializeCircuitDocument(patched.document, { targetPath: 'auto_promo.ct' });
+  const dec = decodeCtContainer(outBytes, 'auto_promo.ct');
+  assert.equal(isDefaultA4Header(dec.headerLinesB64), false, 'Expected DIN A4 header to auto-upgrade to DIN A3');
+
+  const vis = verifyCtVisualLayoutInvariants(dec.ctBody, dec.trailerText, {
+    sheetWidthMm: patched.document.metadata.sheetWidthMm,
+    sheetHeightMm: patched.document.metadata.sheetHeightMm,
+  });
+  assert.equal(vis.ok, true, `Auto-promoted circuit failed visual/F6 geometry: ${JSON.stringify(vis)}`);
+  const rt = verifyCodecRoundtrip(patched.document, outBytes, 'auto_promo.ct');
+  assert.equal(rt.passed, true);
 });
