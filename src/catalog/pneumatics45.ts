@@ -248,12 +248,12 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'swivel_drive',
-    fluidsim45Id: 'FS45_PENDING_SWIVEL_DRIVE',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'PAR1b',
+    fluidsim45IdVerified: true,
     displayName: 'Semi-Rotary / Swivel Drive',
     category: 'actuator',
     domain: 'pneumatic',
-    description: 'Double-acting semi-rotary vane/rack-and-pinion swivel actuator (e.g., Festo DSM/DRQD 180 deg) with angular limit sensor markers.',
+    description: 'Double-acting semi-rotary vane/rack-and-pinion swivel actuator (FluidSIM 4.5 PAR1b, e.g. Festo DSM/DRQD 180 deg) with angular limit sensor markers.',
     keywords: ['swivel', 'semi-rotary', 'rotary actuator', 'vane', '180', 'dsm', 'turn'],
     ports: [
       { name: 'A', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 22 } },
@@ -294,13 +294,13 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   // =========================================================================
   {
     type: 'vacuum_suction_nozzle',
-    fluidsim45Id: 'FS45_PENDING_VACUUM_EJECTOR',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'PAV1',
+    fluidsim45IdVerified: true,
     displayName: 'Vacuum Suction Nozzle (Venturi Ejector)',
     category: 'vacuum',
     domain: 'pneumatic',
-    description: 'Venturi vacuum generator producing negative gauge pressure on port 1v when port 1 is supplied and port 3 exhausts.',
-    keywords: ['vacuum', 'venturi', 'suction nozzle', 'ejector', 'generator', '1v'],
+    description: 'Venturi vacuum generator (FluidSIM 4.5 PAV1) producing negative gauge pressure on port 1v when port 1 is supplied and port 3 exhausts.',
+    keywords: ['vacuum', 'venturi', 'suction nozzle', 'ejector', 'generator', '1v', 'pav1'],
     ports: [
       { name: '1', domain: 'pneumatic', role: 'supply', required: true, offset: { x: 0, y: 8 } },
       { name: '3', domain: 'pneumatic', role: 'exhaust', required: true, offset: { x: 24, y: 8 } },
@@ -315,13 +315,13 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'vacuum_sucker',
-    fluidsim45Id: 'FS45_PENDING_VACUUM_SUCKER',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'PAV1S',
+    fluidsim45IdVerified: true,
     displayName: 'Vacuum Suction Cup (Sucker)',
     category: 'vacuum',
     domain: 'pneumatic',
-    description: 'Vacuum gripper suction cup; grips workpiece when port 1v pressure drops below gripThresholdBar and releases on blow-off/vent.',
-    keywords: ['suction cup', 'sucker', 'vacuum gripper', 'vacuum', 'pad', '1v'],
+    description: 'Vacuum gripper suction cup (FluidSIM 4.5 PAV1S); grips workpiece when port 1v pressure drops below gripThresholdBar and releases on blow-off/vent.',
+    keywords: ['suction cup', 'sucker', 'vacuum gripper', 'vacuum', 'pad', '1v', 'pav1s'],
     ports: [
       { name: '1v', domain: 'pneumatic', role: 'vacuum', required: true, offset: { x: 10, y: 16 } },
     ],
@@ -467,12 +467,12 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   // =========================================================================
   {
     type: 'flow_control_one_way',
-    fluidsim45Id: 'DV_P1',
+    fluidsim45Id: 'DRSV2_pneu',
     fluidsim45IdVerified: true,
     displayName: 'One-Way Flow Control Valve (Throttle Check)',
     category: 'flow_pressure_logic',
     domain: 'pneumatic',
-    description: 'Adjustable throttle with parallel check valve for meter-out or meter-in cylinder speed control.',
+    description: 'Adjustable throttle with parallel check valve (FluidSIM 4.5 DRSV2_pneu) for meter-out or meter-in cylinder speed control.',
     keywords: ['throttle', 'flow control', 'one-way', 'meter-out', 'meter-in', 'speed'],
     ports: [
       { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 16 } },
@@ -525,12 +525,12 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'check_valve_spring',
-    fluidsim45Id: 'CheckValvePilotOperatedSpringLoadedP',
+    fluidsim45Id: 'CheckValveSpringLoadedP',
     fluidsim45IdVerified: true,
     displayName: 'Spring-Loaded Check Valve (Optional Pilot)',
     category: 'flow_pressure_logic',
     domain: 'pneumatic',
-    description: 'Spring-loaded non-return check valve (FluidSIM 4.5 CheckValvePilotOperatedSpringLoadedP); allows flow 1->2 above crackingPressureBar and blocks 2->1 unless pilot 12 unlocks.',
+    description: 'Spring-loaded non-return check valve (FluidSIM 4.5 CheckValveSpringLoadedP); allows flow 1->2 above crackingPressureBar and blocks 2->1 unless pilot 12 unlocks.',
     keywords: ['check valve', 'spring-loaded', 'non-return', 'vacuum check', 'pilot check'],
     ports: [
       { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 16 } },
@@ -686,11 +686,11 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     type: 'pressure_switch_differential',
     fluidsim45Id: 'PEW',
     fluidsim45IdVerified: true,
-    displayName: 'Differential / Vacuum Pressure Switch (PEW)',
+    displayName: 'Differential / Vacuum Pressure Switch (PEW / PSW1)',
     category: 'measuring',
     domain: 'hybrid',
-    description: 'Adjustable pneumatic-to-electrical differential or vacuum pressure switch (FluidSIM 4.5 PEW). Switches bound electrical contacts sharing its label when P1-P2 crosses pressureBar.',
-    keywords: ['pressure switch', 'vacuum switch', 'differential', 'pew', 'sensor', 'b1', '-2b1'],
+    description: 'Adjustable pneumatic-to-electrical differential or vacuum pressure switch (FluidSIM 4.5 PEW 2-port / PSW1 1-port). Switches bound electrical contacts sharing its label when P1-P2 crosses pressureBar.',
+    keywords: ['pressure switch', 'vacuum switch', 'differential', 'pew', 'psw1', 'sensor', 'b1', '-2b1'],
     ports: [
       { name: 'P1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 16 } },
       { name: 'P2', domain: 'pneumatic', role: 'working', required: false, offset: { x: 16, y: 16 } },

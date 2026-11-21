@@ -11,8 +11,9 @@ import {
   decodeCtContainer,
   decompressCtPayload,
   encodeCtContainer,
+  verifyCtPayloadLinearBounds,
 } from '../codec/ctBinaryCodec';
-import type { PreservedCtSections } from '../codec/ctTextCodec';
+import { verifyCtTextInvariants, type PreservedCtSections } from '../codec/ctTextCodec';
 import type { CircuitDocument } from '../contracts/circuit';
 import { EngineeringError } from '../contracts/errors';
 import { generateCircuitFromSpec } from '../authoring/specGenerator';
@@ -70,6 +71,10 @@ test('Phase 1 golden fixture suite is present and all 6 real FluidSIM .ct files 
     assert.ok(decoded.ctBody.length > 0, `Empty ctBody in ${name}`);
     assert.ok(decoded.trailerText.startsWith('ENDCT\n'), `Missing ENDCT trailer in ${name}`);
     const reencodedBytes = encodeCtContainer(decoded);
+    const bounds = verifyCtPayloadLinearBounds(reencodedBytes, name);
+    assert.equal(bounds.ok, true, `Linear LZ ring check failed for ${name}: ${JSON.stringify(bounds)}`);
+    assert.equal(bounds.refWrapReads, 0, `Unexpected refWrapReads on ${name}`);
+    assert.equal(bounds.uninitializedReads, 0, `Unexpected uninitializedReads on ${name}`);
     const redecoded = decodeCtContainer(reencodedBytes, name);
     assert.equal(redecoded.ctBody, decoded.ctBody, `Plain ctBody mismatch after re-compression for ${name}`);
     assert.equal(redecoded.previewBlockB64, decoded.previewBlockB64, `Preview WMF mismatch for ${name}`);
@@ -107,6 +112,10 @@ test('binary LZ+RLE compressor roundtrips arbitrary binary & repeated payloads i
 
   for (const extended of [true, false]) {
     const compressed = compressCtPayload(sample, { extended });
+    const bounds = verifyCtPayloadLinearBounds(compressed, `mem_${extended}.ct`);
+    assert.equal(bounds.ok, true, `Linear LZ bounds failed for extended=${extended}: ${JSON.stringify(bounds)}`);
+    assert.equal(bounds.refWrapReads, 0);
+    assert.equal(bounds.uninitializedReads, 0);
     const { decompressed, profile } = decompressCtPayload(compressed, 'mem.ct');
     assert.equal(profile.extended, extended);
     assert.ok(decompressed.equals(sample), `Payload mismatch for extended=${extended}`);
@@ -127,6 +136,12 @@ test('freshly authored native .ct circuit roundtrips, patches losslessly, valida
   });
 
   const ctBytes = serializeCircuitDocument(doc, { targetPath: 'abba_generated.ct' });
+  const abbaBounds = verifyCtPayloadLinearBounds(ctBytes, 'abba_generated.ct');
+  assert.equal(abbaBounds.ok, true, JSON.stringify(abbaBounds));
+  assert.equal(abbaBounds.refWrapReads, 0);
+  const abbaDecoded = decodeCtContainer(ctBytes, 'abba_generated.ct');
+  const abbaInv = verifyCtTextInvariants(abbaDecoded.ctBody);
+  assert.equal(abbaInv.ok, true, `4-gate junction invariant failed: ${JSON.stringify(abbaInv.badJunctions)}`);
   const rt = verifyCodecRoundtrip(doc, ctBytes, 'abba_generated.ct');
   assert.equal(rt.passed, true);
 
@@ -421,11 +436,16 @@ test('newly verified FluidSIM 4.5 classes (WV_2, WV_4, FilterP, CheckValveP, PEW
   };
 
   const ctBytes = serializeCircuitDocument(doc, { targetPath: 'verified_classes.ct' });
+  const vBounds = verifyCtPayloadLinearBounds(ctBytes, 'verified_classes.ct');
+  assert.equal(vBounds.ok, true, JSON.stringify(vBounds));
+  assert.equal(vBounds.refWrapReads, 0);
   const decoded = decodeCtContainer(ctBytes, 'verified_classes.ct');
+  const vInv = verifyCtTextInvariants(decoded.ctBody);
+  assert.equal(vInv.ok, true, `4-gate invariant failed: ${JSON.stringify(vInv.badJunctions)}`);
   assert.ok(decoded.ctBody.includes('WV_2 '));
   assert.ok(decoded.ctBody.includes('FilterP '));
   assert.ok(decoded.ctBody.includes('CheckValveP '));
-  assert.ok(decoded.ctBody.includes('CheckValvePilotOperatedSpringLoadedP '));
+  assert.ok(decoded.ctBody.includes('CheckValveSpringLoadedP '));
   assert.ok(decoded.ctBody.includes('PEW '));
   assert.ok(decoded.ctBody.includes('PressureReducingValve3WaysAdjustableP '));
   assert.ok(decoded.ctBody.includes('LWechsler '));

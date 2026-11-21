@@ -156,11 +156,11 @@ export function parseCtBodyAst(ctBody: string): ParsedCtBodyAst {
       continue;
     }
 
-    // FluidSIM 4.2/4.5 connection: "CON PLine <a> <b>" or "CON ELine <a> <b>"
-    const conMatch = line.match(/^CON\s+(PLine|ELine)\s+(\d+)\s+(\d+)$/);
+    // FluidSIM 4.2/4.5 connection: "CON PLine <a> <b>" or "CON ELine <a> <b>" (tolerates trailing tokens)
+    const conMatch = line.match(/^CON\s+(PLine|ELine|SLine)\s+(\d+)\s+(\d+)(?:\s.*)?$/);
     if (conMatch) {
       curCon = {
-        kind: conMatch[1] as 'PLine' | 'ELine',
+        kind: conMatch[1] === 'PLine' ? 'PLine' : 'ELine',
         portObjA: Number(conMatch[2]),
         portObjB: Number(conMatch[3]),
         rawLine: line,
@@ -555,6 +555,8 @@ export function parseCtContainerToDocument(
   const components: ComponentNode[] = [];
   const compIdByObjIdx = new Map<number, string>();
   const compTypeByObjIdx = new Map<number, string>();
+  const manifoldSliceByObjIdx = new Map<number, number>();
+  const manifoldIdSet = new Set<string>();
   const cylinderNodes: Array<{ node: ComponentNode; cx: number; cy: number }> = [];
   const preservedDecorativeObjects: string[] = [];
 
@@ -632,6 +634,30 @@ export function parseCtContainerToDocument(
 
     let node: ComponentNode | null = null;
 
+    const manifoldId = getScalarProp(obj.props, '_MCP_MANIFOLD_ID');
+    if (manifoldId && obj.cls === 'PTriconnection') {
+      const sliceIdx = getNumberProp(obj.props, '_MCP_MANIFOLD_SLICE', 0);
+      const busRole = getScalarProp(obj.props, '_MCP_MANIFOLD_ROLE') ?? 'supply';
+      const lbl = getScalarProp(obj.props, 'label');
+      manifoldSliceByObjIdx.set(objIdx, sliceIdx);
+      compIdByObjIdx.set(objIdx, manifoldId);
+      compTypeByObjIdx.set(objIdx, 'pneumatic_manifold');
+      if (!manifoldIdSet.has(manifoldId)) {
+        manifoldIdSet.add(manifoldId);
+        usedIds.add(manifoldId);
+        components.push({
+          id: manifoldId,
+          type: 'pneumatic_manifold',
+          ...(lbl ? { label: lbl } : {}),
+          params: { busRole },
+          ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+          layout,
+          rawMetadata,
+        });
+      }
+      continue;
+    }
+
     if (customType) {
       let parsedParams: Record<string, number | string | boolean> = {};
       if (customParamsJson) {
@@ -705,6 +731,51 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
+    } else if (obj.cls === 'PAV1') {
+      const vacuumBar = getNumberProp(obj.props, '_MCP_VAC_BAR', -0.7);
+      const minSupplyBar = getNumberProp(obj.props, '_MCP_MIN_SUP', 3.0);
+      const lbl = getScalarProp(obj.props, 'label');
+      node = {
+        id,
+        type: 'vacuum_suction_nozzle',
+        ...(lbl ? { label: lbl } : {}),
+        params: { vacuumBar, minSupplyBar },
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
+    } else if (obj.cls === 'PAV1S') {
+      const gripThresholdBar = getNumberProp(obj.props, '_MCP_GRIP_BAR', -0.3);
+      const lbl = getScalarProp(obj.props, 'label');
+      node = {
+        id,
+        type: 'vacuum_sucker',
+        ...(lbl ? { label: lbl } : {}),
+        params: { gripThresholdBar },
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
+    } else if (obj.cls === 'PAR1b') {
+      const maxAngleDeg = getNumberProp(obj.props, 'ALPHA', 180);
+      const initialAngleDeg = getNumberProp(obj.props, '_MCP_INIT_DEG', 0);
+      const torqueNm = getNumberProp(obj.props, '_MCP_TORQUE', 5);
+      const externalLoadNm = getNumberProp(obj.props, '_MCP_LOAD_NM', 0);
+      const lbl = getScalarProp(obj.props, 'label');
+      node = {
+        id,
+        type: 'swivel_drive',
+        ...(lbl ? { label: lbl } : {}),
+        params: { maxAngleDeg, initialAngleDeg, torqueNm, externalLoadNm },
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
+      cylinderNodes.push({
+        node,
+        cx: (obj.x1 + obj.x2) / 2,
+        cy: (obj.y1 + obj.y2) / 2,
+      });
     } else if (obj.cls === 'PTriconnection' || obj.cls === 'PVS4') {
       const pGates = objGates.filter((g) => objByIdx.get(g.childId)?.cls === 'PConnection');
       node = {
@@ -780,8 +851,11 @@ export function parseCtContainerToDocument(
       const nominalFlowLMin = getNumberProp(obj.props, 'NN_FLOW', type === 'valve_3_2' ? 120 : type === 'valve_2_2' ? 200 : 500);
       const lbl = getScalarProp(obj.props, 'label');
 
+      const switchedPosR = getScalarProp(obj.props, 'SWITCHED_POS_R') ?? '';
       const switchedNo =
         getScalarProp(obj.props, '_MCP_NORMAL_STATE') === 'NO' ||
+        switchedPosR.includes('C3P') ||
+        switchedPosR.includes('C2P') ||
         getBoolProp(obj.props, 'SWITCHED_POS_R') ||
         (getScalarProp(obj.props, 'BODY_R') ?? '').includes('NO');
       const normalState = switchedNo ? 'NO' : 'NC';
@@ -833,6 +907,19 @@ export function parseCtContainerToDocument(
           rawMetadata,
         };
       }
+    } else if (obj.cls === 'DRSV1_pneu') {
+      const level = getNumberProp(obj.props, 'LEVEL', 50);
+      const openingPct = Math.max(1, Math.min(100, level > 0 ? level : 50));
+      const lbl = getScalarProp(obj.props, 'label');
+      node = {
+        id,
+        type: 'throttle_valve',
+        ...(lbl ? { label: lbl } : {}),
+        params: { openingPct },
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
     } else if (obj.cls === 'CheckValveP') {
       const crackingPressureBar = getNumberProp(obj.props, 'P_V', 0.1);
       const lbl = getScalarProp(obj.props, 'label');
@@ -845,7 +932,7 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'CheckValvePilotOperatedSpringLoadedP') {
+    } else if (obj.cls === 'CheckValveSpringLoadedP' || obj.cls === 'CheckValvePilotOperatedSpringLoadedP') {
       const crackingPressureBar = getNumberProp(obj.props, 'P_V', 0.3);
       const lbl = getScalarProp(obj.props, 'label');
       node = {
@@ -869,16 +956,32 @@ export function parseCtContainerToDocument(
         rawMetadata,
       };
     } else if (obj.cls === 'DRSV2_pneu') {
+      const pGates = objGates.filter((g) => objByIdx.get(g.childId)?.cls === 'PConnection');
       const lbl = getScalarProp(obj.props, 'label');
-      node = {
-        id,
-        type: 'dual_pressure_valve_and',
-        ...(lbl ? { label: lbl } : {}),
-        params: {},
-        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
-        layout,
-        rawMetadata,
-      };
+      if (pGates.length >= 3) {
+        node = {
+          id,
+          type: 'dual_pressure_valve_and',
+          ...(lbl ? { label: lbl } : {}),
+          params: {},
+          ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+          layout,
+          rawMetadata,
+        };
+      } else {
+        const level = getNumberProp(obj.props, 'LEVEL', 50);
+        const openingPct = Math.max(1, Math.min(100, level > 0 ? level : 50));
+        const freeFlowDirection = getScalarProp(obj.props, '_MCP_FREE_FLOW') === '2_to_1' ? '2_to_1' : '1_to_2';
+        node = {
+          id,
+          type: 'flow_control_one_way',
+          ...(lbl ? { label: lbl } : {}),
+          params: { openingPct, freeFlowDirection },
+          ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+          layout,
+          rawMetadata,
+        };
+      }
     } else if (obj.cls === 'PressureReducingValve3WaysAdjustableP') {
       const setPressureBar = getNumberProp(obj.props, 'P_SOLL', 4.0);
       const lbl = getScalarProp(obj.props, 'label');
@@ -891,7 +994,7 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'PEW') {
+    } else if (obj.cls === 'PEW' || obj.cls === 'PSW1') {
       const pressureBar = getNumberProp(obj.props, 'P_SOLL', -0.5);
       const hysteresisBar = getNumberProp(obj.props, '_MCP_HYST', 0.05);
       const triggerModeRaw = getScalarProp(obj.props, '_MCP_TRIG_MODE');
@@ -907,37 +1010,120 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'pol2') {
+    } else if (obj.cls === 'PressureGaugeP' || obj.cls === 'ManometerP' || obj.cls === 'PM1') {
+      const lbl = getScalarProp(obj.props, 'label');
+      node = {
+        id,
+        type: 'pressure_gauge',
+        ...(lbl ? { label: lbl } : {}),
+        params: { minBar: -1, maxBar: 10 },
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
+    } else if (obj.cls === 'ReservoirP' || obj.cls === 'AirTankP') {
+      const volumeL = getNumberProp(obj.props, 'V', 1.0);
+      const lbl = getScalarProp(obj.props, 'label');
+      node = {
+        id,
+        type: 'air_reservoir',
+        ...(lbl ? { label: lbl } : {}),
+        params: { volumeL },
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
+    } else if (obj.cls === 'SilencerP') {
+      node = { id, type: 'exhaust_silencer', params: {}, layout, rawMetadata };
+    } else if (obj.cls === 'TimeDelayValveP' || obj.cls === 'VZ_NC' || obj.cls === 'VZ_NO') {
+      const delayMs = Math.max(10, Math.round(getNumberProp(obj.props, 'DELAY_TIME', 10) * 100));
+      const normalState = obj.cls === 'VZ_NO' ? 'NO' : 'NC';
+      const lbl = getScalarProp(obj.props, 'label');
+      node = {
+        id,
+        type: 'time_delay_valve',
+        ...(lbl ? { label: lbl } : {}),
+        params: { delayMs, normalState },
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
+    } else if (obj.cls === 'PressureSequenceValveP' || obj.cls === 'DFV') {
+      const thresholdBar = getNumberProp(obj.props, 'P_SOLL', 4.0);
+      const lbl = getScalarProp(obj.props, 'label');
+      node = {
+        id,
+        type: 'pressure_sequence_valve',
+        ...(lbl ? { label: lbl } : {}),
+        params: { thresholdBar },
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
+    } else if (obj.cls === 'pol2' || obj.cls === 'L24V' || obj.cls === 'E_U001') {
       node = { id, type: 'power_24v', params: { voltageV: 24 }, layout, rawMetadata };
-    } else if (obj.cls === 'pol1') {
+    } else if (obj.cls === 'pol1' || obj.cls === 'L0V' || obj.cls === 'E_U002') {
       node = { id, type: 'power_0v', params: {}, layout, rawMetadata };
     } else if (obj.cls === 'ETriconnection') {
       node = { id, type: 'electrical_junction', params: {}, layout, rawMetadata };
-    } else if (obj.cls === 'E_S011' || obj.cls === 'E_S031') {
+    } else if (
+      obj.cls === 'E_S011' ||
+      obj.cls === 'E_S031' ||
+      obj.cls === 'E_S021' ||
+      obj.cls === 'LTaster_s' ||
+      obj.cls === 'LSchalter_s'
+    ) {
       const lbl = getScalarProp(obj.props, 'label');
+      const isDetent = obj.cls === 'E_S031' || obj.cls === 'E_S021' || obj.cls === 'LSchalter_s';
       node = {
         id,
         type: 'pushbutton_no',
         ...(lbl ? { label: lbl } : {}),
-        params: { detent: obj.cls === 'E_S031' },
+        params: { detent: isDetent },
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'E_S012') {
+    } else if (
+      obj.cls === 'E_S012' ||
+      obj.cls === 'E_S032' ||
+      obj.cls === 'E_S022' ||
+      obj.cls === 'LTaster_o' ||
+      obj.cls === 'LSchalter_o' ||
+      obj.cls === 'LNotAus'
+    ) {
       const lbl = getScalarProp(obj.props, 'label');
+      const isDetent =
+        obj.cls === 'E_S032' ||
+        obj.cls === 'E_S022' ||
+        obj.cls === 'LSchalter_o' ||
+        obj.cls === 'LNotAus' ||
+        getBoolProp(obj.props, '_MCP_DETENT');
       node = {
         id,
         type: 'pushbutton_nc',
         ...(lbl ? { label: lbl } : {}),
-        params: { detent: getBoolProp(obj.props, '_MCP_DETENT') },
+        params: { detent: isDetent },
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'E_S001' || obj.cls === 'E_S002') {
+    } else if (
+      obj.cls === 'E_S001' ||
+      obj.cls === 'E_S002' ||
+      obj.cls === 'LSchliesser' ||
+      obj.cls === 'LSchliesser_r' ||
+      obj.cls === 'LSchliesser_p' ||
+      obj.cls === 'LOeffner' ||
+      obj.cls === 'LOeffner_r' ||
+      obj.cls === 'LOeffner_p'
+    ) {
       const lbl = getScalarProp(obj.props, 'label');
       const switchType = getNumberProp(obj.props, 'SWITCH_TYPE', 0);
-      const isLimit = switchType === 1 || (lbl !== undefined && allMarkerLabels.has(lbl));
-      const isNc = obj.cls === 'E_S002';
+      const isLimit =
+        switchType === 1 ||
+        obj.cls.endsWith('_r') ||
+        obj.cls.endsWith('_p') ||
+        (lbl !== undefined && allMarkerLabels.has(lbl));
+      const isNc = obj.cls === 'E_S002' || obj.cls.startsWith('LOeffner');
       const type = isLimit
         ? isNc
           ? 'limit_switch_nc'
@@ -953,7 +1139,12 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'LWechsler') {
+    } else if (
+      obj.cls === 'LWechsler' ||
+      obj.cls === 'E_S003' ||
+      obj.cls === 'E_S013' ||
+      obj.cls === 'E_S023'
+    ) {
       const lbl = getScalarProp(obj.props, 'label');
       node = {
         id,
@@ -963,7 +1154,7 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'E_K001') {
+    } else if (obj.cls === 'E_K001' || obj.cls === 'LRelais' || obj.cls === 'LRelaismagnet') {
       const lbl = getScalarProp(obj.props, 'label');
       node = {
         id,
@@ -973,7 +1164,7 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'E_K008') {
+    } else if (obj.cls === 'E_K008' || obj.cls === 'LRelaismagnet_anzver') {
       const lbl = getScalarProp(obj.props, 'label');
       // FluidSIM 4.5 stores E_K008 DELAY_TIME in tenths of a second (e.g. 50 = 5.0 s = 5000 ms).
       const delayTenths = getNumberProp(obj.props, 'DELAY_TIME', 10);
@@ -985,7 +1176,7 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'LRelaismagnet_abfver') {
+    } else if (obj.cls === 'LRelaismagnet_abfver' || obj.cls === 'E_K009') {
       const lbl = getScalarProp(obj.props, 'label');
       const delayTenths = getNumberProp(obj.props, 'DELAY_TIME', 10);
       node = {
@@ -996,7 +1187,7 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'E_P010') {
+    } else if (obj.cls === 'E_P010' || obj.cls === 'LZaehler') {
       const lbl = getScalarProp(obj.props, 'label');
       const presetCount = Math.max(1, Math.round(getNumberProp(obj.props, 'N', 3)));
       node = {
@@ -1007,7 +1198,7 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'E_Y001') {
+    } else if (obj.cls === 'E_Y001' || obj.cls === 'E_Y002' || obj.cls === 'LMagnetventil') {
       const lbl = getScalarProp(obj.props, 'label');
       node = {
         id,
@@ -1017,7 +1208,7 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'lampe') {
+    } else if (obj.cls === 'lampe' || obj.cls === 'LLampe' || obj.cls === 'E_H001' || obj.cls === 'E_H002') {
       const lbl = getScalarProp(obj.props, 'label');
       const rgb = getNumberProp(obj.props, 'sig_color', 65280);
       node = {
@@ -1101,6 +1292,8 @@ export function parseCtContainerToDocument(
     });
   };
 
+  const directJunctionPortCursor = new Map<string, number>();
+
   // Helper to resolve an AST object index (either a port child or a direct junction parent) to (compId, portName)
   const resolveEndpoint = (
     endpointIdx: number,
@@ -1111,6 +1304,24 @@ export function parseCtContainerToDocument(
       const compType = compTypeByObjIdx.get(p.parentId);
       const parentObj = objByIdx.get(p.parentId);
       if (!compId || !compType) return undefined;
+
+      // Map chained 4-gate PTriconnection manifold slices back to canonical ports '1'..'8'
+      const sliceIdx = manifoldSliceByObjIdx.get(p.parentId);
+      if (sliceIdx !== undefined) {
+        const portObj = objByIdx.get(endpointIdx);
+        const explicitPort = portObj ? getScalarProp(portObj.props, '_MCP_MANIFOLD_PORT') : undefined;
+        if (explicitPort) {
+          return { compId, port: explicitPort, cls: parentObj?.cls ?? '', portObj };
+        }
+        let mappedPort: string | undefined;
+        if (sliceIdx === 0 && p.gateNum >= 1 && p.gateNum <= 3) mappedPort = String(p.gateNum);
+        else if (sliceIdx === 1 && p.gateNum === 2) mappedPort = '4';
+        else if (sliceIdx === 1 && p.gateNum === 3) mappedPort = '5';
+        else if (sliceIdx === 2 && p.gateNum >= 2 && p.gateNum <= 4) mappedPort = String(p.gateNum + 4);
+        if (!mappedPort) return undefined;
+        return { compId, port: mappedPort, cls: parentObj?.cls ?? '', portObj };
+      }
+
       const port =
         parentObj?.cls === 'CompressorFixedP'
           ? p.gateNum === 1
@@ -1122,18 +1333,43 @@ export function parseCtContainerToDocument(
       if (!port) return undefined;
       return { compId, port, cls: parentObj?.cls ?? '', portObj: objByIdx.get(endpointIdx) };
     }
-    // Fallback: CON directly targeting a junction parent object
+    // Fallback: CON directly targeting a junction parent object — allocate distinct ports 1..4/8
     const directCompId = compIdByObjIdx.get(endpointIdx);
     const directType = compTypeByObjIdx.get(endpointIdx);
-    if (directCompId && (directType === 'pneumatic_junction' || directType === 'electrical_junction' || directType === 'pneumatic_manifold')) {
-      return { compId: directCompId, port: '1', cls: objByIdx.get(endpointIdx)?.cls ?? '' };
+    if (
+      directCompId &&
+      (directType === 'pneumatic_junction' ||
+        directType === 'electrical_junction' ||
+        directType === 'pneumatic_manifold')
+    ) {
+      const maxP = directType === 'pneumatic_manifold' ? 8 : 4;
+      const next = (directJunctionPortCursor.get(directCompId) ?? 0) + 1;
+      directJunctionPortCursor.set(directCompId, next);
+      const port = String(Math.min(next, maxP));
+      return { compId: directCompId, port, cls: objByIdx.get(endpointIdx)?.cls ?? '' };
     }
     return undefined;
   };
 
+  interface ParsedPolylineInfo {
+    domain: 'pneumatic' | 'electrical';
+    anchorCompId: string;
+    anchorPort: string;
+    segments: Array<{ x1: number; y1: number; x2: number; y2: number }>;
+  }
+  const parsedPolylines: ParsedPolylineInfo[] = [];
+
   for (const con of ast.connections) {
+    if (getBoolProp(con.props, '_MCP_MANIFOLD_LINK')) continue;
     const epA = resolveEndpoint(con.portObjA);
     const epB = resolveEndpoint(con.portObjB);
+    const segs: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+    for (const pl of con.props) {
+      const m = pl.match(/^L\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)/);
+      if (m) {
+        segs.push({ x1: Number(m[1]), y1: Number(m[2]), x2: Number(m[3]), y2: Number(m[4]) });
+      }
+    }
     if (!epA || !epB) continue;
 
     const domain: 'pneumatic' | 'electrical' =
@@ -1147,9 +1383,17 @@ export function parseCtContainerToDocument(
 
     const customEdgeId = getScalarProp(con.props, '_MCP_EDGE_ID');
     recordEdge(epA.compId, epA.port, epB.compId, epB.port, domain, customEdgeId || `E_${con.portObjA}_${con.portObjB}`);
+    if (segs.length > 0) {
+      parsedPolylines.push({
+        domain,
+        anchorCompId: epA.compId,
+        anchorPort: epA.port,
+        segments: segs,
+      });
+    }
   }
 
-  // Coincident-port & polyline endpoint matching for abutted/rotated FluidSIM ports (e.g., PVS4 @ 270 deg, PTriconnection)
+  // Coincident-port & polyline endpoint/T-tap matching for abutted/rotated FluidSIM ports (e.g., PVS4 @ 270 deg, PTriconnection, ETriconnection)
   const portObjEntries: Array<{
     objIdx: number;
     cls: 'PConnection' | 'EConnection';
@@ -1172,7 +1416,7 @@ export function parseCtContainerToDocument(
       port: ep.port,
     });
   }
-  const COINCIDENT_TOL = 512; // 0.5 mm in FluidSIM units
+  const COINCIDENT_TOL = 1024; // 1.0 mm in FluidSIM units (absorbs rotated port rounding on 90/180/270 deg symbols)
   for (let i = 0; i < portObjEntries.length; i++) {
     const a = portObjEntries[i];
     for (let j = i + 1; j < portObjEntries.length; j++) {
@@ -1188,6 +1432,55 @@ export function parseCtContainerToDocument(
     }
   }
 
+  // Match any remaining unconnected port sitting directly on an existing polyline segment/vertex (T-tap / rotated port touch)
+  const pointNearSegment = (
+    px: number,
+    py: number,
+    seg: { x1: number; y1: number; x2: number; y2: number },
+    tol: number,
+  ): boolean => {
+    const minX = Math.min(seg.x1, seg.x2) - tol;
+    const maxX = Math.max(seg.x1, seg.x2) + tol;
+    const minY = Math.min(seg.y1, seg.y2) - tol;
+    const maxY = Math.max(seg.y1, seg.y2) + tol;
+    if (px < minX || px > maxX || py < minY || py > maxY) return false;
+    const dx = seg.x2 - seg.x1;
+    const dy = seg.y2 - seg.y1;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq === 0) {
+      return Math.hypot(px - seg.x1, py - seg.y1) <= tol;
+    }
+    const t = Math.max(0, Math.min(1, ((px - seg.x1) * dx + (py - seg.y1) * dy) / lenSq));
+    const projX = seg.x1 + t * dx;
+    const projY = seg.y1 + t * dy;
+    return Math.hypot(px - projX, py - projY) <= tol;
+  };
+
+  // For external (non-MCP-authored) native .ct files, match remaining unconnected ports sitting directly on wire segments
+  const hasMcpEdges = ast.connections.some((c) => getScalarProp(c.props, '_MCP_EDGE_ID') !== undefined);
+  if (!hasMcpEdges) {
+    for (const entry of portObjEntries) {
+      if (connectedPortObjIndices.has(entry.objIdx)) continue;
+      const entryDomain: 'pneumatic' | 'electrical' = entry.cls === 'PConnection' ? 'pneumatic' : 'electrical';
+      for (const pl of parsedPolylines) {
+        if (pl.domain !== entryDomain) continue;
+        if (pl.anchorCompId === entry.compId && pl.anchorPort === entry.port) continue;
+        if (pl.segments.some((s) => pointNearSegment(entry.cx, entry.cy, s, COINCIDENT_TOL))) {
+          recordEdge(
+            entry.compId,
+            entry.port,
+            pl.anchorCompId,
+            pl.anchorPort,
+            entryDomain,
+            `E_TAP_${entry.objIdx}`,
+          );
+          connectedPortObjIndices.add(entry.objIdx);
+          break;
+        }
+      }
+    }
+  }
+
   // Synthesize exhaust_silencer (EX1/EX2/EX3) or blind_plug (EX4) nodes for unconnected PConnections
   for (let objIdx = 0; objIdx < ast.objects.length; objIdx++) {
     const obj = ast.objects[objIdx];
@@ -1198,13 +1491,10 @@ export function parseCtContainerToDocument(
     const isPlug = exType === 'EX4';
     if (!isExhaust && !isPlug) continue;
 
-    const owner = parentByChild.get(objIdx);
-    if (!owner) continue;
-    const ownerCompId = compIdByObjIdx.get(owner.parentId);
-    const ownerType = compTypeByObjIdx.get(owner.parentId);
-    if (!ownerCompId || !ownerType) continue;
-    const ownerPort = gateNumberToPortName(ownerType, owner.gateNum);
-    if (!ownerPort) continue;
+    const ep = resolveEndpoint(objIdx);
+    if (!ep) continue;
+    const ownerCompId = ep.compId;
+    const ownerPort = ep.port;
 
     if (isPlug) {
       const customPlugId = getScalarProp(obj.props, '_MCP_PLUG_ID');
@@ -1560,6 +1850,190 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         }
         break;
       }
+      case 'pneumatic_manifold': {
+        // FluidSIM 4.5 C++ loader requires EVERY PTriconnection to have EXACTLY 4 PConnection gates
+        // (fewer than 4 gates crashes fl_sim_p.exe with 0xC0000005).
+        // Represent an 8-port manifold as 3 chained 4-gate PTriconnection slices:
+        //   Slice 0 (parentId): gates 1..3 -> ports '1','2','3'; gate 4 -> internal bridge to Slice 1 gate 1
+        //   Slice 1 (slice1Id): gate 1 -> internal bridge; gates 2..3 -> ports '4','5'; gate 4 -> internal bridge to Slice 2 gate 1
+        //   Slice 2 (slice2Id): gate 1 -> internal bridge; gates 2..4 -> ports '6','7','8'
+        const busRole = String(comp.params.busRole ?? 'supply');
+        const sliceStep = 14336; // 14 mm horizontal spacing between chained manifold nodes
+
+        const addSlicePort = (
+          sliceParentId: number,
+          sliceX1: number,
+          gateNum: number,
+          portName?: string,
+          extraProps: string[] = [],
+        ): number => {
+          const pid = allocObjId();
+          const portDef = portName ? getPortDefinition(comp.type, portName) : undefined;
+          const offX = portDef ? Math.round(portDef.offset.x * FS_UNIT_PER_MM) : gateNum * 3072;
+          const offY = portDef ? Math.round(portDef.offset.y * FS_UNIT_PER_MM) : 0;
+          const px1 = (portDef ? x1 : sliceX1) + offX - 2048;
+          const py1 = y1 + offY - 2048;
+          const px2 = px1 + 4096;
+          const py2 = py1 + 4096;
+          objectBlocks.push([`PConnection O${pid} ${px1} ${py1} ${px2} ${py2} 0 0 348163`, ...extraProps].join('\n'));
+          gateLines.push(`gate${gateNum} # ${sliceParentId} ${pid}`);
+          if (portName) {
+            portObjIdMap.set(`${comp.id}:${portName}`, pid);
+          }
+          return pid;
+        };
+
+        const sliceMeta = (sliceIdx: number): string[] => [
+          ` S _MCP_MANIFOLD_ID S ${comp.id}`,
+          ` S _MCP_MANIFOLD_ROLE S ${busRole}`,
+          ` S _MCP_MANIFOLD_SLICE I ${sliceIdx}`,
+          ...(sliceIdx === 0 ? labelProp : []),
+        ];
+
+        // Slice 0 (parentId already allocated immediately before switch)
+        objectBlocks.push(
+          [`PTriconnection O${parentId} ${x1} ${y1} ${x1 + 12288} ${y1 + 12288} ${rot} ${flip} 4311043`, ...sliceMeta(0)].join(
+            '\n',
+          ),
+        );
+        addSlicePort(parentId, x1, 1, '1', [...pPortProps('1'), ' S _MCP_MANIFOLD_PORT S 1']);
+        addSlicePort(parentId, x1, 2, '2', [...pPortProps('2'), ' S _MCP_MANIFOLD_PORT S 2']);
+        addSlicePort(parentId, x1, 3, '3', [...pPortProps('3'), ' S _MCP_MANIFOLD_PORT S 3']);
+        const s0BridgeOut = addSlicePort(parentId, x1, 4, undefined, [
+          ' S ex_type_FEST B T',
+          ' S ex_type S EX0',
+          ' S R_H_FEST B T',
+          ' S R_H F 0',
+        ]);
+
+        // Slice 1 (allocate objId right before pushing to preserve strict 0-based object array indexing!)
+        const slice1Id = allocObjId();
+        const s1x1 = x1 + sliceStep;
+        objectBlocks.push(
+          [
+            `PTriconnection O${slice1Id} ${s1x1} ${y1} ${s1x1 + 12288} ${y1 + 12288} ${rot} ${flip} 4311043`,
+            ...sliceMeta(1),
+          ].join('\n'),
+        );
+        const s1BridgeIn = addSlicePort(slice1Id, s1x1, 1, undefined, [
+          ' S ex_type_FEST B T',
+          ' S ex_type S EX0',
+          ' S R_H_FEST B T',
+          ' S R_H F 0',
+        ]);
+        addSlicePort(slice1Id, s1x1, 2, '4', [...pPortProps('4'), ' S _MCP_MANIFOLD_PORT S 4']);
+        addSlicePort(slice1Id, s1x1, 3, '5', [...pPortProps('5'), ' S _MCP_MANIFOLD_PORT S 5']);
+        const s1BridgeOut = addSlicePort(slice1Id, s1x1, 4, undefined, [
+          ' S ex_type_FEST B T',
+          ' S ex_type S EX0',
+          ' S R_H_FEST B T',
+          ' S R_H F 0',
+        ]);
+
+        // Slice 2 (allocate objId right before pushing to preserve strict 0-based object array indexing!)
+        const slice2Id = allocObjId();
+        const s2x1 = x1 + sliceStep * 2;
+        objectBlocks.push(
+          [
+            `PTriconnection O${slice2Id} ${s2x1} ${y1} ${s2x1 + 12288} ${y1 + 12288} ${rot} ${flip} 4311043`,
+            ...sliceMeta(2),
+          ].join('\n'),
+        );
+        const s2BridgeIn = addSlicePort(slice2Id, s2x1, 1, undefined, [
+          ' S ex_type_FEST B T',
+          ' S ex_type S EX0',
+          ' S R_H_FEST B T',
+          ' S R_H F 0',
+        ]);
+        addSlicePort(slice2Id, s2x1, 2, '6', [...pPortProps('6'), ' S _MCP_MANIFOLD_PORT S 6']);
+        addSlicePort(slice2Id, s2x1, 3, '7', [...pPortProps('7'), ' S _MCP_MANIFOLD_PORT S 7']);
+        addSlicePort(slice2Id, s2x1, 4, '8', [...pPortProps('8'), ' S _MCP_MANIFOLD_PORT S 8']);
+
+        // Internal manifold bridge PLine connections (ignored when reparsing semantic graph)
+        connectionBlocks.push(
+          [
+            `CON PLine ${s0BridgeOut} ${s1BridgeIn}`,
+            `L ${x1 + 12288} ${y1 + 6144} ${s1x1} ${y1 + 6144}`,
+            ' S _MCP_MANIFOLD_LINK B T',
+          ].join('\n'),
+        );
+        connectionBlocks.push(
+          [
+            `CON PLine ${s1BridgeOut} ${s2BridgeIn}`,
+            `L ${s1x1 + 12288} ${y1 + 6144} ${s2x1} ${y1 + 6144}`,
+            ' S _MCP_MANIFOLD_LINK B T',
+          ].join('\n'),
+        );
+        break;
+      }
+      case 'vacuum_suction_nozzle': {
+        const vacuumBar = Number(comp.params.vacuumBar ?? -0.7);
+        const minSupplyBar = Number(comp.params.minSupplyBar ?? 3.0);
+        objectBlocks.push(
+          [
+            `PAV1 O${parentId} ${x1} ${y1} ${x1 + 24576} ${y1 + 24576} ${rot} ${flip} 3527683`,
+            idProp,
+            ...labelProp,
+            ' S FLIPPED I 1',
+            ` S _MCP_VAC_BAR F ${vacuumBar}`,
+            ` S _MCP_MIN_SUP F ${minSupplyBar}`,
+          ].join('\n'),
+        );
+        addPortObj(1, 'PConnection', '1', pPortProps('1'));
+        addPortObj(2, 'PConnection', '3', pPortProps('3'));
+        addPortObj(3, 'PConnection', '1v', pPortProps('1v'));
+        break;
+      }
+      case 'vacuum_sucker': {
+        const gripThresholdBar = Number(comp.params.gripThresholdBar ?? -0.3);
+        objectBlocks.push(
+          [
+            `PAV1S O${parentId} ${x1} ${y1} ${x1 + 20480} ${y1 + 20480} ${rot} ${flip} 3527683`,
+            idProp,
+            ...labelProp,
+            ` S _MCP_GRIP_BAR F ${gripThresholdBar}`,
+          ].join('\n'),
+        );
+        addPortObj(1, 'PConnection', '1v', pPortProps('1v'));
+        break;
+      }
+      case 'swivel_drive': {
+        const maxAngleDeg = Number(comp.params.maxAngleDeg ?? 180);
+        const initDeg = Number(comp.params.initialAngleDeg ?? 0);
+        const torqueNm = Number(comp.params.torqueNm ?? 5);
+        const loadNm = Number(comp.params.externalLoadNm ?? 0);
+        objectBlocks.push(
+          [
+            `PAR1b O${parentId} ${x1} ${y1} ${x1 + 40960} ${y1 + 32768} ${rot} ${flip} 4986883`,
+            idProp,
+            ...labelProp,
+            ' S ALPHA_FEST B T',
+            ` S ALPHA F ${maxAngleDeg}`,
+            ' S l1 F 0',
+            ' S l2 F 0',
+            ...(initDeg !== 0 ? [` S _MCP_INIT_DEG F ${initDeg}`] : []),
+            ...(torqueNm !== 5 ? [` S _MCP_TORQUE F ${torqueNm}`] : []),
+            ...(loadNm !== 0 ? [` S _MCP_LOAD_NM F ${loadNm}`] : []),
+          ].join('\n'),
+        );
+        addPortObj(1, 'PConnection', 'A', pPortProps('A'));
+        addPortObj(2, 'PConnection', 'B', pPortProps('B'));
+        if (comp.distanceRule && comp.distanceRule.length > 0) {
+          const drId = allocObjId();
+          const drLines = [
+            `R_SCHALT O${drId} ${x1 + 10240} ${y1 - 24576} ${x1 + 40960} ${y1 - 12288} 0 0 4253703`,
+            ` S _MCP_OWNER_ID S ${comp.id}`,
+          ];
+          comp.distanceRule.forEach((m, idx) => {
+            drLines.push(` S label${idx} S ${m.label}`);
+            drLines.push(` S pos${idx} F ${m.positionMm}`);
+            drLines.push(` S pos_l_${idx} F ${m.positionMm}`);
+            drLines.push(` S pos_r_${idx} F ${m.positionMm}`);
+          });
+          objectBlocks.push(drLines.join('\n'));
+        }
+        break;
+      }
       case 'cylinder_single_acting':
       case 'cylinder_double_acting': {
         const isSac = comp.type === 'cylinder_single_acting';
@@ -1646,7 +2120,20 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             ' S description S 2/n Way Valve',
             ' S BODY_COUNT I 2',
             ` S NN_FLOW F ${flow}`,
-            ...(isNO ? [' S _MCP_NORMAL_STATE S NO', ' S SWITCHED_POS_R B T'] : []),
+            ...(isNO
+              ? [
+                  ' S _MCP_NORMAL_STATE S NO',
+                  ' S SWITCHED_POS_FEST B T',
+                  ' S SWITCHED_POS S (1\tC2C)',
+                  ' S SWITCHED_POS_R_FEST B T',
+                  ' S SWITCHED_POS_R S (2\tC2P)',
+                ]
+              : [
+                  ' S SWITCHED_POS_FEST B T',
+                  ' S SWITCHED_POS S (1\tC2P)',
+                  ' S SWITCHED_POS_R_FEST B T',
+                  ' S SWITCHED_POS_R S (2\tC2C)',
+                ]),
             ...getFluidSimActuationProps('L', comp.leftActuation),
             ...getFluidSimActuationProps('R', comp.rightActuation),
           ].join('\n'),
@@ -1701,7 +2188,20 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             ' S description S 3/n Way Valve',
             ' S BODY_COUNT I 2',
             ` S NN_FLOW F ${flow}`,
-            ...(isNO ? [' S _MCP_NORMAL_STATE S NO', ' S SWITCHED_POS_R B T'] : []),
+            ...(isNO
+              ? [
+                  ' S _MCP_NORMAL_STATE S NO',
+                  ' S SWITCHED_POS_FEST B T',
+                  ' S SWITCHED_POS S (1\tC3C)',
+                  ' S SWITCHED_POS_R_FEST B T',
+                  ' S SWITCHED_POS_R S (2\tC3P)',
+                ]
+              : [
+                  ' S SWITCHED_POS_FEST B T',
+                  ' S SWITCHED_POS S (1\tC3P)',
+                  ' S SWITCHED_POS_R_FEST B T',
+                  ' S SWITCHED_POS_R S (2\tC3C)',
+                ]),
             ...getFluidSimActuationProps('L', comp.leftActuation),
             ...getFluidSimActuationProps('R', comp.rightActuation),
           ].join('\n'),
@@ -1869,7 +2369,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const freeFlow = comp.params.freeFlowDirection === '2_to_1' ? '2_to_1' : '1_to_2';
         objectBlocks.push(
           [
-            `DV_P1 O${parentId} ${x1} ${y1} ${x1 + 15360} ${y1 + 43008} ${rot} ${flip} 6940243`,
+            `DRSV2_pneu O${parentId} ${x1} ${y1} ${x1 + 15360} ${y1 + 43008} ${rot} ${flip} 6940243`,
             idProp,
             ...labelProp,
             ' S LEVEL_FEST B T',
@@ -1877,6 +2377,26 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             ' S NN_FLOW_FEST B T',
             ' S NN_FLOW F 100',
             ...(freeFlow === '2_to_1' ? [' S _MCP_FREE_FLOW S 2_to_1'] : []),
+          ].join('\n'),
+        );
+        addPortObj(1, 'PConnection', '1', pPortProps('1'));
+        addPortObj(2, 'PConnection', '2', pPortProps('2'));
+        break;
+      }
+      case 'throttle_valve': {
+        const openingPct = Number(comp.params.openingPct ?? 50);
+        const paramsB64 = Buffer.from(JSON.stringify(comp.params), 'utf8').toString('base64');
+        objectBlocks.push(
+          [
+            `DRSV2_pneu O${parentId} ${x1} ${y1} ${x1 + 15360} ${y1 + 32768} ${rot} ${flip} 6940243`,
+            idProp,
+            ' S _MCP_TYPE S throttle_valve',
+            ` S _MCP_PARAMS S ${paramsB64}`,
+            ...labelProp,
+            ' S LEVEL_FEST B T',
+            ` S LEVEL F ${openingPct}`,
+            ' S NN_FLOW_FEST B T',
+            ' S NN_FLOW F 100',
           ].join('\n'),
         );
         addPortObj(1, 'PConnection', '1', pPortProps('1'));
@@ -1912,9 +2432,15 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       }
       case 'check_valve_spring': {
         const crack = Number(comp.params.crackingPressureBar ?? 0.3);
+        const hasPilot12 = document.connections.some(
+          (e) =>
+            (e.from.componentId === comp.id && e.from.port === '12') ||
+            (e.to.componentId === comp.id && e.to.port === '12'),
+        );
+        const cls = hasPilot12 ? 'CheckValvePilotOperatedSpringLoadedP' : 'CheckValveSpringLoadedP';
         objectBlocks.push(
           [
-            `CheckValvePilotOperatedSpringLoadedP O${parentId} ${x1} ${y1} ${x1 + 20480} ${y1 + 20480} ${rot} ${flip} 6940243`,
+            `${cls} O${parentId} ${x1} ${y1} ${x1 + 20480} ${y1 + 20480} ${rot} ${flip} 6940243`,
             idProp,
             ...labelProp,
             ` S P_V F ${crack}`,
@@ -1922,7 +2448,9 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         );
         addPortObj(1, 'PConnection', '1', pPortProps('1'));
         addPortObj(2, 'PConnection', '2', pPortProps('2'));
-        addPortObj(3, 'PConnection', '12', pPortProps('12'));
+        if (hasPilot12) {
+          addPortObj(3, 'PConnection', '12', pPortProps('12'));
+        }
         break;
       }
       case 'shuttle_valve_or': {
@@ -2158,13 +2686,12 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         break;
       }
       default: {
-        // Extension catalog types (e.g., vacuum_suction_nozzle, vacuum_sucker, swivel_drive, pneumatic_manifold, standalone exhaust_silencer)
-        // Stored with explicit _MCP_TYPE and _MCP_PARAMS metadata so roundtrips remain 100% lossless!
+        // Extension catalog types: always choose a FluidSIM 4.5 native class whose required gate count matches
+        // what we emit (NEVER emit PTriconnection or ETriconnection with != 4 gates, as fl_sim_p.exe crashes!).
         const isElec =
           comp.type.startsWith('relay_') ||
           comp.type.startsWith('timer_relay_') ||
           comp.type.startsWith('proximity_');
-        const baseCls = isElec ? 'E_K001' : 'PTriconnection';
         const paramsB64 = Buffer.from(JSON.stringify(comp.params), 'utf8').toString('base64');
         const actLProp = comp.leftActuation
           ? [` S _MCP_ACT_L S ${Buffer.from(JSON.stringify(comp.leftActuation), 'utf8').toString('base64')}`]
@@ -2172,6 +2699,22 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const actRProp = comp.rightActuation
           ? [` S _MCP_ACT_R S ${Buffer.from(JSON.stringify(comp.rightActuation), 'utf8').toString('base64')}`]
           : [];
+
+        const nativeFallbackMap: Record<string, { cls: string; ports: string[] }> = {
+          cylinder_rodless: { cls: 'CylDGPPAB', ports: ['A', 'B'] },
+          air_motor: { cls: 'PAR1b', ports: ['A', 'B'] },
+          air_reservoir: { cls: 'FilterP', ports: ['1', '2'] },
+          pressure_relief_valve: { cls: 'CheckValveSpringLoadedP', ports: ['1', '2'] },
+          pressure_gauge: { cls: 'PSW1', ports: ['1'] },
+          proximity_switch_magnetic: { cls: 'E_S001', ports: ['13', '14'] },
+          time_delay_valve: { cls: 'WV_3', ports: ['2', '1', '3', '12', '10'] },
+          pressure_sequence_valve: { cls: 'WV_3', ports: ['2', '1', '3', '12', '10'] },
+          exhaust_silencer: { cls: 'PSW1', ports: ['1'] },
+          blind_plug: { cls: 'PSW1', ports: ['1'] },
+        };
+        const mapped = nativeFallbackMap[comp.type];
+        const baseCls = mapped ? mapped.cls : isElec ? 'E_K001' : 'PTriconnection';
+
         objectBlocks.push(
           [
             `${baseCls} O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4311043`,
@@ -2183,17 +2726,46 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             ...labelProp,
           ].join('\n'),
         );
-        // Allocate ports referenced by connections (or default gate1)
-        const referencedPorts = new Set<string>();
-        for (const e of document.connections) {
-          if (e.from.componentId === comp.id) referencedPorts.add(e.from.port);
-          if (e.to.componentId === comp.id) referencedPorts.add(e.to.port);
+
+        if (mapped) {
+          for (const portName of mapped.ports) {
+            const gNum = portNameToGateNumber(comp.type, portName);
+            addPortObj(gNum, isElec ? 'EConnection' : 'PConnection', portName, isElec ? [] : pPortProps(portName));
+          }
+        } else if (baseCls === 'PTriconnection' || baseCls === 'ETriconnection') {
+          // Enforce strict 4-gate FluidSIM 4.5 invariant on any junction fallback
+          const referencedPorts = new Set<string>();
+          for (const e of document.connections) {
+            if (e.from.componentId === comp.id) referencedPorts.add(e.from.port);
+            if (e.to.componentId === comp.id) referencedPorts.add(e.to.port);
+          }
+          const byGate = new Map<number, string>();
+          for (const portName of referencedPorts) {
+            const gNum = portNameToGateNumber(comp.type, portName);
+            if (gNum >= 1 && gNum <= 4 && !byGate.has(gNum)) {
+              byGate.set(gNum, portName);
+            }
+          }
+          for (let g = 1; g <= 4; g++) {
+            const portName = byGate.get(g) ?? String(g);
+            addPortObj(g, isElec ? 'EConnection' : 'PConnection', portName, isElec ? [] : pPortProps(portName));
+          }
+        } else {
+          const referencedPorts = new Set<string>();
+          for (const e of document.connections) {
+            if (e.from.componentId === comp.id) referencedPorts.add(e.from.port);
+            if (e.to.componentId === comp.id) referencedPorts.add(e.to.port);
+          }
+          if (referencedPorts.size === 0) {
+            referencedPorts.add(isElec ? 'A1' : '1');
+            if (isElec) referencedPorts.add('A2');
+          }
+          for (const portName of referencedPorts) {
+            const gNum = portNameToGateNumber(comp.type, portName);
+            addPortObj(gNum, isElec ? 'EConnection' : 'PConnection', portName, isElec ? [] : pPortProps(portName));
+          }
         }
-        if (referencedPorts.size === 0) referencedPorts.add('1');
-        for (const portName of referencedPorts) {
-          const gNum = portNameToGateNumber(comp.type, portName);
-          addPortObj(gNum, isElec ? 'EConnection' : 'PConnection', portName, isElec ? [] : pPortProps(portName));
-        }
+
         // Emit R_SCHALT distance-rule markers for swivel_drive / cylinder_rodless
         if (comp.distanceRule && comp.distanceRule.length > 0) {
           const drId = allocObjId();
@@ -2294,3 +2866,35 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     ctBody,
   };
 }
+
+export interface CtTextInvariantReport {
+  ok: boolean;
+  badJunctions: Array<{ cls: string; objId: number; gateCount: number }>;
+}
+
+/**
+ * Verifies FluidSIM 4.5 C++ loader structural invariants on a decoded .ct body:
+ * every PTriconnection and ETriconnection MUST have exactly 4 child gates (fewer crashes fl_sim_p.exe).
+ */
+export function verifyCtTextInvariants(ctBody: string): CtTextInvariantReport {
+  const ast = parseCtBodyAst(ctBody);
+  const gateCountByParent = new Map<number, number>();
+  for (const g of ast.gates) {
+    gateCountByParent.set(g.parentId, (gateCountByParent.get(g.parentId) ?? 0) + 1);
+  }
+  const badJunctions: Array<{ cls: string; objId: number; gateCount: number }> = [];
+  for (let i = 0; i < ast.objects.length; i++) {
+    const obj = ast.objects[i];
+    if (obj.cls === 'PTriconnection' || obj.cls === 'ETriconnection') {
+      const count = gateCountByParent.get(i) ?? 0;
+      if (count !== 4) {
+        badJunctions.push({ cls: obj.cls, objId: obj.objId, gateCount: count });
+      }
+    }
+  }
+  return {
+    ok: badJunctions.length === 0,
+    badJunctions,
+  };
+}
+

@@ -52,6 +52,43 @@ export class WorkspaceGuard {
     return this.resolveCircuitPath(relativeDir, false);
   }
 
+  public writeProjectMetaFileAtomic(
+    relativePath: string,
+    content: string,
+  ): { absolutePath: string; relativePath: string } {
+    const resolved = this.resolveCircuitPath(relativePath, false);
+    const base = path.basename(resolved);
+    if (base !== 'fluidsim-project.json' && base !== 'README.md') {
+      throw new EngineeringError({
+        category: 'AccessDenied',
+        code: 'DISALLOWED_EXTENSION',
+        message: `Metadata write only permits fluidsim-project.json or README.md (got "${base}").`,
+        offendingIds: [relativePath],
+        suggestedFix: 'Use circuit_create or circuit_apply_patch for circuit files.',
+      });
+    }
+    const dir = path.dirname(resolved);
+    fs.mkdirSync(dir, { recursive: true });
+    const tmpPath = path.join(dir, `.${base}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+    try {
+      fs.writeFileSync(tmpPath, content, 'utf8');
+      fs.renameSync(tmpPath, resolved);
+    } catch (err) {
+      if (fs.existsSync(tmpPath)) {
+        try {
+          fs.unlinkSync(tmpPath);
+        } catch {
+          // ignore cleanup failure
+        }
+      }
+      throw err;
+    }
+    return {
+      absolutePath: resolved,
+      relativePath: this.toRelativePath(resolved),
+    };
+  }
+
   public deleteCircuitFile(filePath: string): { absolutePath: string; relativePath: string } {
     const resolved = this.resolveCircuitPath(filePath);
     if (!fs.existsSync(resolved)) {

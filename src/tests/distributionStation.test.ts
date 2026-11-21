@@ -8,6 +8,8 @@ import { simulateCircuit } from '../simulator/simulator';
 import { serializeCircuitDocument } from '../codec/ctSerializer';
 import { parseCircuitBuffer } from '../codec/ctParser';
 import { verifyCodecRoundtrip } from '../codec/ctRoundtripGuard';
+import { decodeCtContainer, verifyCtPayloadLinearBounds } from '../codec/ctBinaryCodec';
+import { verifyCtTextInvariants } from '../codec/ctTextCodec';
 
 function buildFestoDistributionStationCircuit(): CircuitDocument {
   const now = new Date().toISOString();
@@ -266,6 +268,30 @@ test('Festo MPS-C Distributing Station passes static validation (0 errors, 0 war
 
   // 3. Native FluidSIM 4.5 .ct roundtrip preserves all metadata, rotations, composite actuation, and normallyOpen
   const ctBytes = serializeCircuitDocument(doc, { targetPath: 'distribution_station.ct' });
+  const lzBounds = verifyCtPayloadLinearBounds(ctBytes, 'distribution_station.ct');
+  assert.equal(lzBounds.ok, true, `Distribution Station LZ linear bounds failed: ${JSON.stringify(lzBounds)}`);
+  assert.equal(lzBounds.refWrapReads, 0);
+  assert.equal(lzBounds.uninitializedReads, 0);
+
+  const decoded = decodeCtContainer(ctBytes, 'distribution_station.ct');
+  const inv = verifyCtTextInvariants(decoded.ctBody);
+  assert.equal(inv.ok, true, `PTriconnection/ETriconnection 4-gate invariant failed: ${JSON.stringify(inv.badJunctions)}`);
+  for (const cls of [
+    'PAV1S ',
+    'PAV1 ',
+    'PAR1b ',
+    'DRSV2_pneu ',
+    'CheckValveSpringLoadedP ',
+    'FilterP ',
+    'WV_2 ',
+    'WV_3 ',
+    'WV_5 ',
+    'PEW ',
+  ]) {
+    assert.ok(decoded.ctBody.includes(cls), `Expected genuine FluidSIM 4.5 class "${cls.trim()}" in distribution_station.ct`);
+  }
+  assert.ok(decoded.ctBody.includes('SWITCHED_POS_R S (2\tC3P)'), 'Expected native FluidSIM 4.5 NO WV_3 SWITCHED_POS_R');
+
   const rt = verifyCodecRoundtrip(doc, ctBytes, 'distribution_station.ct');
   assert.equal(rt.passed, true);
 

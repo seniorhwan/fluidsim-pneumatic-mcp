@@ -126,33 +126,62 @@ test('end-to-end stdio MCP server exercises full autonomous agent loop, lifecycl
     assert.equal(elecVal.errorCount, 0);
     assert.equal(elecVal.warningCount, 0);
 
-    // Project lifecycle tools: project_create, circuit_clone (.fsim.json -> .ct), circuit_rename, circuit_delete
+    // Project lifecycle tools: project_create (Part 2.2), circuit_clone (Part 2.4), circuit_rename, circuit_delete (confirm guard)
     const projRes = await callJsonTool(client, 'project_create', {
-      name: 'mps-station',
-      starterCircuit: 'starter.ct',
-      template: 'pneumatic_basic',
+      projectDir: 'mps-station',
+      name: 'MPS Distributing Station',
+      description: 'Headless pneumatic station project',
+      author: 'Automation Team',
+      starterCircuit: 'pneumatic_basic',
+      starterFileName: 'starter.ct',
       sheetSize: 'DIN_A3_LANDSCAPE',
     });
-    assert.equal(projRes.ok, true);
+    assert.equal(projRes.ok, true, JSON.stringify(projRes));
     assert.equal(projRes.data?.projectDir, 'mps-station');
+    assert.equal(projRes.data?.manifestPath, 'mps-station/fluidsim-project.json');
+    assert.equal(projRes.data?.readmePath, 'mps-station/README.md');
+    assert.equal(projRes.data?.starterCircuitPath, 'mps-station/circuits/starter.ct');
+    assert.equal((projRes.data?.validation as { valid: boolean }).valid, true);
+    assert.equal(fs.existsSync(path.join(workspace, 'mps-station', 'fluidsim-project.json')), true);
+    assert.equal(fs.existsSync(path.join(workspace, 'mps-station', 'README.md')), true);
+    assert.equal(fs.existsSync(path.join(workspace, 'mps-station', 'circuits', 'starter.ct')), true);
 
     const cloneRes = await callJsonTool(client, 'circuit_clone', {
-      fromPath: 'elec_tpl.fsim.json',
-      toPath: 'mps-station/cloned.ct',
+      sourcePath: 'elec_tpl.fsim.json',
+      targetPath: 'mps-station/circuits/cloned.ct',
+      newTitle: 'Cloned Electro Template',
     });
-    assert.equal(cloneRes.ok, true);
+    assert.equal(cloneRes.ok, true, JSON.stringify(cloneRes));
+    assert.equal(cloneRes.data?.title, 'Cloned Electro Template');
 
     const renameRes = await callJsonTool(client, 'circuit_rename', {
-      fromPath: 'mps-station/cloned.ct',
-      toPath: 'mps-station/renamed.ct',
+      fromPath: 'mps-station/circuits/cloned.ct',
+      toPath: 'mps-station/circuits/renamed.ct',
     });
     assert.equal(renameRes.ok, true);
 
-    const delRes = await callJsonTool(client, 'circuit_delete', { path: 'mps-station/renamed.ct' });
+    // circuit_delete requires confirm: true
+    const delBlocked = await callJsonTool(client, 'circuit_delete', {
+      path: 'mps-station/circuits/renamed.ct',
+      confirm: false,
+    });
+    assert.equal(delBlocked.ok, false);
+    assert.equal(delBlocked.error?.code, 'DELETE_CONFIRMATION_REQUIRED');
+
+    const delRes = await callJsonTool(client, 'circuit_delete', {
+      path: 'mps-station/circuits/renamed.ct',
+      confirm: true,
+    });
     assert.equal(delRes.ok, true);
-    const delElecRes = await callJsonTool(client, 'circuit_delete', { path: 'elec_tpl.fsim.json' });
+    const delElecRes = await callJsonTool(client, 'circuit_delete', {
+      path: 'elec_tpl.fsim.json',
+      confirm: true,
+    });
     assert.equal(delElecRes.ok, true);
-    const delStarterRes = await callJsonTool(client, 'circuit_delete', { path: 'mps-station/starter.ct' });
+    const delStarterRes = await callJsonTool(client, 'circuit_delete', {
+      path: 'mps-station/circuits/starter.ct',
+      confirm: true,
+    });
     assert.equal(delStarterRes.ok, true);
 
     // 4. Autonomous self-healing loop using Gemini-safe paramsJson & paramsList
@@ -410,17 +439,17 @@ test('Phase 4 & H3 hardening: single-acting K_HOLD latch across dwell, dryRun pr
   try {
     await client.connect(transport);
 
-    // 0. H3 regression test: single-acting cylinder A + dwell WAIT:500ms + B+ + A-B- uses K_HOLD_A memory latch
+    // 0. H3 regression test: single-acting cylinder A (throttles: true) + dwell WAIT:500ms + B+ + A-B- uses K_HOLD_A memory latch
     const genH3 = await callJsonTool(client, 'circuit_generate_from_spec', {
       path: 'h3_single_acting_dwell.ct',
       actuators: [
-        { label: 'A', type: 'single-acting', strokeMm: 50, throttles: false },
-        { label: 'B', type: 'double-acting', strokeMm: 100, throttles: false },
+        { label: 'A', type: 'single-acting', strokeMm: 50, throttles: true },
+        { label: 'B', type: 'double-acting', strokeMm: 100, throttles: true },
       ],
       sequence: ['A+', 'WAIT:500ms', 'B+', 'A-B-'],
       controlMethod: 'electro-pneumatic-step-chain',
-      startMode: 'single-cycle',
-      includeEStop: false,
+      startMode: 'continuous',
+      includeEStop: true,
     });
     assert.equal(genH3.ok, true, JSON.stringify(genH3));
     assert.equal((genH3.data?.validation as { valid: boolean }).valid, true);

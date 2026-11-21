@@ -186,14 +186,24 @@ export const circuitQueryComponentsInputShape = {
 };
 
 export const projectCreateInputShape = {
-  name: z.string().min(1).describe('Relative project directory name inside workspace (e.g. "mps-distributing").'),
-  starterCircuit: z
+  projectDir: z
     .string()
-    .optional()
-    .describe('Optional starter circuit filename inside the project folder (e.g. "main.ct" or "main.fsim.json").'),
-  template: z.enum(['blank', 'pneumatic_basic', 'electro_pneumatic_24v']).default('pneumatic_basic'),
-  sheetSize: sheetSizeEnumSchema.default('DIN_A4_LANDSCAPE'),
+    .default('.')
+    .describe('Relative project directory inside workspace (default ".").'),
+  name: z.string().min(1).describe('Project name (e.g. "MPS Distributing Station").'),
+  description: z.string().optional().describe('Optional project description.'),
+  sheetSize: sheetSizeEnumSchema.default('DIN_A3_LANDSCAPE'),
+  author: z.string().optional().describe('Optional author name.'),
+  starterCircuit: z
+    .enum(['none', 'blank', 'pneumatic_basic', 'electro_pneumatic_24v'])
+    .default('pneumatic_basic')
+    .describe('Optional starter circuit template created under <projectDir>/circuits/ (or "none").'),
+  starterFileName: z
+    .string()
+    .default('main.ct')
+    .describe('Filename for the starter circuit inside <projectDir>/circuits/ (default "main.ct").'),
   sheetDomain: sheetDomainEnumSchema.optional(),
+  overwrite: z.boolean().default(false),
 };
 
 export const circuitCreateInputShape = {
@@ -207,9 +217,10 @@ export const circuitCreateInputShape = {
 };
 
 export const circuitCloneInputShape = {
-  fromPath: z.string().min(1).describe('Source workspace-relative circuit file path.'),
-  toPath: z.string().min(1).describe('Destination workspace-relative circuit file path (.ct or .fsim.json).'),
+  sourcePath: z.string().min(1).describe('Source workspace-relative circuit file path.'),
+  targetPath: z.string().min(1).describe('Destination workspace-relative circuit file path (.ct or .fsim.json).'),
   overwrite: z.boolean().default(false),
+  newTitle: z.string().optional().describe('Optional new title for the cloned circuit.'),
 };
 
 export const circuitRenameInputShape = {
@@ -220,6 +231,7 @@ export const circuitRenameInputShape = {
 
 export const circuitDeleteInputShape = {
   path: z.string().min(1).describe('Workspace-relative circuit file path to delete.'),
+  confirm: z.boolean().describe('Must be true to confirm deletion of the circuit file.'),
 };
 
 export const circuitApplyPatchInputShape = {

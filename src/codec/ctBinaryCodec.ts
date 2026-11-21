@@ -331,6 +331,8 @@ export function compressCtPayload(
     Buffer.from('       PREVIEW', 'latin1').copy(ring, 0);
   }
   let rpos = initRpos % ringLimit;
+  let maxFilled = initRpos;
+  let wrapped = false;
   const out: number[] = [...header];
 
   // Flush pending literal bytes in chunks of up to 127 (0x81..0xff)
@@ -352,7 +354,7 @@ export function compressCtPayload(
   const n = plainBytes.length;
 
   while (i < n) {
-    // 1. Check RLE run (3..2047 identical bytes; avoid encoding 0x0d/0x0a? No, XOR happens after)
+    // 1. Check RLE run (4..2047 identical bytes)
     let rleLen = 1;
     const maxRle = Math.min((1 << indexBits) - 1, n - i);
     while (rleLen < maxRle && plainBytes[i + rleLen] === plainBytes[i]) {
@@ -369,12 +371,15 @@ export function compressCtPayload(
         for (let j = 0; j < rleLen; j++) {
           ring[rpos++] = val;
         }
+        if (rpos > maxFilled) maxFilled = rpos;
       }
       i += rleLen;
       continue;
     }
 
-    // 2. Search ring buffer for longest match >= 3 (greedy bounded scan over ringLimit)
+    // 2. Search ring buffer linearly for longest match >= 3.
+    // FluidSIM 4.5's native C++ decompressor reads ring[ref .. ref + len - 1] LINEARLY
+    // without modulo wrap-around, so we strictly enforce ref + mlen <= searchLimit <= ringLimit.
     let bestLen = 0;
     let bestRef = 0;
     const maxAllowedMatch = Math.min(
@@ -382,22 +387,17 @@ export function compressCtPayload(
       n - i,
       ringLimit - 1,
     );
+    const searchLimit = wrapped ? ringLimit : maxFilled;
 
-    if (maxAllowedMatch >= 3) {
+    if (maxAllowedMatch >= 3 && searchLimit >= 3) {
       const b0 = plainBytes[i];
       const b1 = plainBytes[i + 1];
       const b2 = plainBytes[i + 2];
-      for (let ref = 0; ref < ringLimit; ref++) {
-        if (
-          ring[ref] === b0 &&
-          ring[(ref + 1) % ringLimit] === b1 &&
-          ring[(ref + 2) % ringLimit] === b2
-        ) {
+      for (let ref = 0; ref <= searchLimit - 3; ref++) {
+        if (ring[ref] === b0 && ring[ref + 1] === b1 && ring[ref + 2] === b2) {
+          const avail = Math.min(maxAllowedMatch, searchLimit - ref);
           let mlen = 3;
-          while (
-            mlen < maxAllowedMatch &&
-            ring[(ref + mlen) % ringLimit] === plainBytes[i + mlen]
-          ) {
+          while (mlen < avail && ring[ref + mlen] === plainBytes[i + mlen]) {
             mlen++;
           }
           if (mlen > bestLen) {
@@ -411,15 +411,20 @@ export function compressCtPayload(
 
     if (bestLen >= 3) {
       flushLiterals();
-      // Snapshot bytes BEFORE updating ring (exact mirror of decoder)
+      // Snapshot bytes linearly BEFORE updating ring (exact mirror of FluidSIM C++ decoder)
       const snap = Buffer.allocUnsafe(bestLen);
       for (let j = 0; j < bestLen; j++) {
-        snap[j] = ring[(bestRef + j) % ringLimit];
+        snap[j] = ring[bestRef + j];
       }
-      if (rpos + bestLen >= ringLimit) rpos = 0;
+      if (rpos + bestLen >= ringLimit) {
+        rpos = 0;
+        wrapped = true;
+        maxFilled = ringLimit;
+      }
       for (let j = 0; j < bestLen; j++) {
         ring[rpos++] = snap[j];
       }
+      if (rpos > maxFilled) maxFilled = rpos;
 
       if (bestLen <= maxShortLen) {
         const b0 = ((bestLen - 1) << shift) | ((bestRef >> 8) & ((1 << shift) - 1));
@@ -438,7 +443,12 @@ export function compressCtPayload(
     const c = plainBytes[i++];
     litBuf.push(c);
     ring[rpos++] = c;
-    if (rpos >= ringLimit) rpos = 0;
+    if (rpos > maxFilled) maxFilled = rpos;
+    if (rpos >= ringLimit) {
+      rpos = 0;
+      wrapped = true;
+      maxFilled = ringLimit;
+    }
   }
 
   flushLiterals();
@@ -449,6 +459,131 @@ export function compressCtPayload(
     masked[k] = out[k] ^ FLUIDSIM_CT_XOR_KEY;
   }
   return masked;
+}
+
+/**
+ * Audits a compressed FluidSIM `.ct` payload (XOR-masked bytes) to verify that every emitted
+ * LZ back-reference strictly satisfies FluidSIM 4.5's linear C++ ring-buffer bounds:
+ * `ref + len <= ringLimit` and (before first wrap) `ref + len <= maxFilled`.
+ */
+export function verifyCtPayloadLinearBounds(maskedOrContainerBytes: Buffer, filePath = ''): {
+  ok: boolean;
+  refWrapReads: number;
+  uninitializedReads: number;
+  maxRefEnd: number;
+  ringLimit: number;
+  lzTokenCount: number;
+} {
+  let maskedBytes = maskedOrContainerBytes;
+  if (isFluidSimCtBuffer(maskedOrContainerBytes)) {
+    const lines = splitCtLines(maskedOrContainerBytes);
+    let markerIdx = -1;
+    for (let i = lines.length - 2; i >= 0; i--) {
+      if (lines[i].equals(FLUIDSIM_CT_MARKER_LINE)) {
+        markerIdx = i;
+        break;
+      }
+    }
+    if (markerIdx >= 0 && markerIdx + 1 < lines.length) {
+      const payloadParts = lines.slice(markerIdx + 1);
+      maskedBytes =
+        payloadParts.length === 1
+          ? payloadParts[0]
+          : Buffer.concat(
+              payloadParts.flatMap((part, idx) =>
+                idx === 0 ? [part] : [Buffer.from([0x0d, 0x0a]), part],
+              ),
+            );
+    }
+  }
+
+  const unmasked = Buffer.allocUnsafe(maskedBytes.length);
+  for (let i = 0; i < maskedBytes.length; i++) {
+    unmasked[i] = maskedBytes[i] ^ FLUIDSIM_CT_XOR_KEY;
+  }
+  const profile = parseCompressionProfile(unmasked, filePath);
+  const headerLen = profile.rawHeaderHex.length / 2;
+  const data = unmasked.subarray(headerLen);
+
+  const shift = profile.indexBits - 8;
+  const mask = (1 << shift) - 1;
+  const rleMax = 1 << shift;
+  const longMax = profile.extended ? 2 << shift : rleMax;
+  const ringLimit = profile.windowSize - 1;
+
+  let rpos = profile.initRpos % ringLimit;
+  let maxFilled = profile.initRpos;
+  let wrapped = false;
+  let p = 0;
+  let refWrapReads = 0;
+  let uninitializedReads = 0;
+  let maxRefEnd = 0;
+  let lzTokenCount = 0;
+
+  while (p < data.length) {
+    const b = data[p];
+    if (b >= 0x80) {
+      const n = b - 0x80;
+      for (let j = 0; j < n; j++) {
+        rpos++;
+        if (rpos > maxFilled) maxFilled = rpos;
+        if (rpos >= ringLimit) {
+          rpos = 0;
+          wrapped = true;
+          maxFilled = ringLimit;
+        }
+      }
+      p += 1 + n;
+    } else if (b < rleMax) {
+      const count = ((b & mask) << 8) | data[p + 1];
+      if (count <= profile.maxLen && rpos + count < ringLimit) {
+        rpos += count;
+        if (rpos > maxFilled) maxFilled = rpos;
+      }
+      p += 3;
+    } else if (b < longMax) {
+      const ref = ((b & mask) << 8) | data[p + 1];
+      const len = data[p + 2];
+      lzTokenCount++;
+      const refEnd = ref + len;
+      if (refEnd > maxRefEnd) maxRefEnd = refEnd;
+      if (refEnd > ringLimit) refWrapReads++;
+      if (!wrapped && refEnd > maxFilled) uninitializedReads++;
+      if (rpos + len >= ringLimit) {
+        rpos = 0;
+        wrapped = true;
+        maxFilled = ringLimit;
+      }
+      rpos += len;
+      if (rpos > maxFilled) maxFilled = rpos;
+      p += 3;
+    } else {
+      const len = (b >> shift) + 1;
+      const ref = ((b & mask) << 8) | data[p + 1];
+      lzTokenCount++;
+      const refEnd = ref + len;
+      if (refEnd > maxRefEnd) maxRefEnd = refEnd;
+      if (refEnd > ringLimit) refWrapReads++;
+      if (!wrapped && refEnd > maxFilled) uninitializedReads++;
+      if (rpos + len >= ringLimit) {
+        rpos = 0;
+        wrapped = true;
+        maxFilled = ringLimit;
+      }
+      rpos += len;
+      if (rpos > maxFilled) maxFilled = rpos;
+      p += 2;
+    }
+  }
+
+  return {
+    ok: refWrapReads === 0 && uninitializedReads === 0,
+    refWrapReads,
+    uninitializedReads,
+    maxRefEnd,
+    ringLimit,
+    lzTokenCount,
+  };
 }
 
 export function decodeCtContainer(buffer: Buffer, filePath = ''): DecodedCtContainer {

@@ -348,34 +348,104 @@ function buildTemplateDocument(
 export function handleProjectCreate(
   ctx: McpToolContext,
   args: {
+    projectDir?: string;
     name: string;
-    starterCircuit?: string;
-    template?: 'blank' | 'pneumatic_basic' | 'electro_pneumatic_24v';
+    description?: string;
     sheetSize?: SheetSizePreset;
+    author?: string;
+    starterCircuit?: 'none' | 'blank' | 'pneumatic_basic' | 'electro_pneumatic_24v';
+    starterFileName?: string;
     sheetDomain?: SheetDomain;
+    overwrite?: boolean;
   },
 ) {
   ctx.guard.ensureRootExists({ createIfMissing: true });
-  const projectDirAbs = ctx.guard.resolveProjectDir(args.name);
-  fs.mkdirSync(projectDirAbs, { recursive: true });
-  const projectRel = ctx.guard.toRelativePath(projectDirAbs);
+  const requestedDir = args.projectDir ?? '.';
+  const projectDirAbs = ctx.guard.resolveProjectDir(requestedDir);
+  const projectRelRaw = ctx.guard.toRelativePath(projectDirAbs);
+  const projectRel = projectRelRaw || '.';
 
-  let createdCircuit: ReturnType<typeof handleCircuitCreate> | undefined;
-  if (args.starterCircuit) {
-    const circuitRel = path.posix.join(projectRel, args.starterCircuit);
-    createdCircuit = handleCircuitCreate(ctx, {
-      path: circuitRel,
-      template: args.template ?? 'pneumatic_basic',
-      sheetSize: args.sheetSize ?? 'DIN_A4_LANDSCAPE',
-      sheetDomain: args.sheetDomain,
-      overwrite: false,
+  const manifestRel = projectRel === '.' ? 'fluidsim-project.json' : path.posix.join(projectRel, 'fluidsim-project.json');
+  const readmeRel = projectRel === '.' ? 'README.md' : path.posix.join(projectRel, 'README.md');
+  const manifestAbs = ctx.guard.resolveProjectDir(manifestRel);
+
+  if (fs.existsSync(manifestAbs) && !args.overwrite) {
+    throw new EngineeringError({
+      category: 'AccessDenied',
+      code: 'FILE_ALREADY_EXISTS',
+      message: `Project manifest "${manifestRel}" already exists and overwrite=false.`,
+      offendingIds: [manifestRel],
+      suggestedFix: 'Pass overwrite=true or choose a new projectDir.',
     });
   }
 
+  const circuitsDirAbs = path.join(projectDirAbs, 'circuits');
+  fs.mkdirSync(circuitsDirAbs, { recursive: true });
+
+  const sheetSize: SheetSizePreset = args.sheetSize ?? 'DIN_A3_LANDSCAPE';
+  const starterTemplate = args.starterCircuit ?? 'pneumatic_basic';
+  const starterFileName = args.starterFileName ?? 'main.ct';
+  const now = new Date().toISOString();
+
+  let starterCircuitPath: string | null = null;
+  let starterValidation:
+    | { valid: boolean; errorCount: number; warningCount: number }
+    | undefined;
+
+  if (starterTemplate !== 'none') {
+    const circuitRel =
+      projectRel === '.'
+        ? path.posix.join('circuits', starterFileName)
+        : path.posix.join(projectRel, 'circuits', starterFileName);
+    const createdCircuit = handleCircuitCreate(ctx, {
+      path: circuitRel,
+      template: starterTemplate,
+      title: args.name,
+      sheetSize,
+      sheetDomain: args.sheetDomain,
+      overwrite: Boolean(args.overwrite),
+    });
+    starterCircuitPath = createdCircuit.path;
+    starterValidation = createdCircuit.validation;
+  }
+
+  const manifest = {
+    schemaVersion: '1.0',
+    fluidsimVersion: '4.5',
+    name: args.name,
+    ...(args.description ? { description: args.description } : {}),
+    ...(args.author ? { author: args.author } : {}),
+    sheetSize,
+    circuitsDir: 'circuits',
+    ...(starterCircuitPath ? { starterCircuit: starterCircuitPath } : {}),
+    createdAt: now,
+    updatedAt: now,
+  };
+  const writtenManifest = ctx.guard.writeProjectMetaFileAtomic(
+    manifestRel,
+    `${JSON.stringify(manifest, null, 2)}\n`,
+  );
+
+  const readmeContent = [
+    `# ${args.name}`,
+    '',
+    ...(args.description ? [args.description, ''] : []),
+    `- **Target Runtime:** Festo FluidSIM Pneumatics 4.5`,
+    `- **Default Sheet Size:** ${sheetSize}`,
+    ...(args.author ? [`- **Author:** ${args.author}`] : []),
+    `- **Circuits Directory:** \`circuits/\``,
+    ...(starterCircuitPath ? [`- **Starter Circuit:** \`${starterCircuitPath}\``] : []),
+    '',
+  ].join('\n');
+  const writtenReadme = ctx.guard.writeProjectMetaFileAtomic(readmeRel, readmeContent);
+
   return {
     projectDir: projectRel,
+    manifestPath: writtenManifest.relativePath,
+    readmePath: writtenReadme.relativePath,
+    starterCircuitPath,
+    ...(starterValidation ? { validation: starterValidation } : {}),
     created: true,
-    ...(createdCircuit ? { starterCircuit: createdCircuit } : {}),
   };
 }
 
@@ -429,25 +499,29 @@ export function handleCircuitCreate(
 
 export function handleCircuitClone(
   ctx: McpToolContext,
-  args: { fromPath: string; toPath: string; overwrite?: boolean },
+  args: { sourcePath: string; targetPath: string; overwrite?: boolean; newTitle?: string },
 ) {
-  const { document, relativePath: fromRel } = loadCircuitFromWorkspace(ctx, args.fromPath);
-  const dstAbs = ctx.guard.resolveCircuitPath(args.toPath);
+  const { document, relativePath: sourceRel } = loadCircuitFromWorkspace(ctx, args.sourcePath);
+  const dstAbs = ctx.guard.resolveCircuitPath(args.targetPath);
   if (fs.existsSync(dstAbs) && !args.overwrite) {
     throw new EngineeringError({
       category: 'AccessDenied',
       code: 'FILE_ALREADY_EXISTS',
-      message: `Destination circuit file "${args.toPath}" already exists and overwrite=false.`,
-      offendingIds: [args.toPath],
+      message: `Destination circuit file "${args.targetPath}" already exists and overwrite=false.`,
+      offendingIds: [args.targetPath],
       suggestedFix: 'Pass overwrite=true or choose a new destination filename.',
     });
   }
   const cloned: CircuitDocument = structuredClone(document);
+  if (args.newTitle) {
+    cloned.metadata.title = args.newTitle;
+  }
   cloned.metadata.updatedAt = new Date().toISOString();
-  const saved = saveCircuitWithPostcondition(ctx, args.toPath, cloned);
+  const saved = saveCircuitWithPostcondition(ctx, args.targetPath, cloned);
   return {
-    fromPath: fromRel,
-    toPath: saved.relativePath,
+    sourcePath: sourceRel,
+    targetPath: saved.relativePath,
+    title: cloned.metadata.title,
     componentCount: cloned.components.length,
     connectionCount: cloned.connections.length,
     postconditionPassed: saved.postcondition.passed,
@@ -468,7 +542,16 @@ export function handleCircuitRename(
   };
 }
 
-export function handleCircuitDelete(ctx: McpToolContext, args: { path: string }) {
+export function handleCircuitDelete(ctx: McpToolContext, args: { path: string; confirm: boolean }) {
+  if (args.confirm !== true) {
+    throw new EngineeringError({
+      category: 'AccessDenied',
+      code: 'DELETE_CONFIRMATION_REQUIRED',
+      message: `Deleting "${args.path}" requires confirm=true.`,
+      offendingIds: [args.path],
+      suggestedFix: 'Pass confirm: true to explicitly confirm deletion of the circuit file.',
+    });
+  }
   const res = ctx.guard.deleteCircuitFile(args.path);
   return {
     path: res.relativePath,
