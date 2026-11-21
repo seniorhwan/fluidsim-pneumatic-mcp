@@ -296,9 +296,59 @@ test('end-to-end stdio MCP server exercises full autonomous agent loop, lifecycl
     assert.equal(verifyRes.ok, true);
     assert.equal(verifyRes.data?.passed, true);
 
+    // 6. Create blank native .ct and patch from scratch (verifies ROUNDTRIP_RAW_AST_LOST regression is fixed)
+    const blankCtRes = await callJsonTool(client, 'circuit_create', {
+      path: 'fresh_patch.ct',
+      template: 'blank',
+      title: 'Blank CT Patch E2E',
+      sheetSize: 'DIN_A3_LANDSCAPE',
+      sheetDomain: 'pneumatic-only',
+      allowExternalElectricalSheet: true,
+    });
+    assert.equal(blankCtRes.ok, true);
+
+    const patchCtRes = await callJsonTool(client, 'circuit_apply_patch', {
+      path: 'fresh_patch.ct',
+      operations: [
+        { op: 'add_component', component: { id: 'S', type: 'air_source', params: { pressureBar: 6 } } },
+        { op: 'add_component', component: { id: 'F', type: 'air_service_unit', label: '-0Z1', params: { nominalPressureBar: 6 } } },
+        {
+          op: 'add_component',
+          component: {
+            id: 'V',
+            type: 'valve_5_2',
+            label: '-1V1',
+            leftActuation: { type: 'solenoid', label: '-1M1', manualOverride: true, internalPilot: true },
+            rightActuation: { type: 'pneumatic_spring', springReturn: true },
+          },
+        },
+        { op: 'add_component', component: { id: 'EX3', type: 'exhaust_silencer' } },
+        { op: 'add_component', component: { id: 'EX5', type: 'exhaust_silencer' } },
+        { op: 'add_component', component: { id: 'TH', type: 'flow_control_one_way', label: '-1V2', rotationDeg: 180, params: { openingPct: 50 } } },
+        { op: 'add_component', component: { id: 'C', type: 'cylinder_double_acting', label: '-1A1', params: { strokeMm: 100 } } },
+        { op: 'connect', from: { componentId: 'S', port: '1' }, to: { componentId: 'F', port: '1' }, domain: 'pneumatic' },
+        { op: 'connect', from: { componentId: 'F', port: '2' }, to: { componentId: 'V', port: '1' }, domain: 'pneumatic' },
+        { op: 'connect', from: { componentId: 'V', port: '3' }, to: { componentId: 'EX3', port: '1' }, domain: 'pneumatic' },
+        { op: 'connect', from: { componentId: 'V', port: '5' }, to: { componentId: 'EX5', port: '1' }, domain: 'pneumatic' },
+        { op: 'connect', from: { componentId: 'V', port: '4' }, to: { componentId: 'TH', port: '1' }, domain: 'pneumatic' },
+        { op: 'connect', from: { componentId: 'TH', port: '2' }, to: { componentId: 'C', port: 'A' }, domain: 'pneumatic' },
+        { op: 'connect', from: { componentId: 'V', port: '2' }, to: { componentId: 'C', port: 'B' }, domain: 'pneumatic' },
+      ],
+    });
+    assert.equal(patchCtRes.ok, true);
+
+    const layoutCtRes = await callJsonTool(client, 'circuit_auto_layout', { path: 'fresh_patch.ct' });
+    assert.equal(layoutCtRes.ok, true);
+
+    const valCtRes = await callJsonTool(client, 'circuit_validate', { path: 'fresh_patch.ct' });
+    assert.equal(valCtRes.ok, true);
+    assert.equal(valCtRes.data?.valid, true);
+    assert.equal(valCtRes.data?.errorCount, 0);
+    assert.equal(valCtRes.data?.warningCount, 0);
+
     const wsStatus = await callJsonTool(client, 'workspace_status');
     assert.equal(wsStatus.ok, true);
-    assert.equal((wsStatus.data?.files as unknown[]).length, 3);
+    assert.equal((wsStatus.data?.files as unknown[]).length, 4);
   } finally {
     await client.close();
     fs.rmSync(workspace, { recursive: true, force: true });

@@ -324,12 +324,21 @@ test('Festo MPS-C Distributing Station passes static validation (0 errors, 0 war
   }
   assert.ok(decoded.ctBody.includes('SWITCHED_POS_R S (2\tC3P)'), 'Expected native FluidSIM 4.5 NO WV_3 SWITCHED_POS_R');
 
-  // Verify exhaust silencers (EX_MAIN, EX_2V1) are embedded as EX3 on their parent ports, never emitted as PSW1
+  // Verify exhaust silencers (EX_MAIN, EX_2V1) are embedded as EX3 / PAV1 port 3, never emitted as PSW1
   const psw1Matches = decoded.ctBody.match(/^PSW1 /gm) ?? [];
   assert.equal(psw1Matches.length, 1, `Expected exactly 1 PSW1 (PSW_2B1), found ${psw1Matches.length}`);
   assert.ok(decoded.ctBody.includes('_MCP_EXH_ID S EX_MAIN'), 'Expected EX_MAIN embedded on parent port');
-  assert.ok(decoded.ctBody.includes('_MCP_EXH_ID S EX_2V1'), 'Expected EX_2V1 embedded on parent port');
+  assert.ok(decoded.ctBody.includes('_MCP_EXH_3_ID S EX_2V1'), 'Expected EX_2V1 embedded on PAV1 port 3');
   assert.ok(decoded.ctBody.includes('ex_type S EX3'), 'Expected EX3 exhaust silencer port attribute');
+
+  // Verify native GDI FluidSIM 4.5 rendering properties (piston rod, PAR1b l1/l2, PAV1/PAV1S/PSW1 flags, A3 bounds)
+  assert.ok(decoded.ctBody.includes('S piston S CP_CA'), 'Expected native CylDGPPAB piston rod');
+  assert.ok(decoded.ctBody.includes('S l1 S -3B1'), 'Expected native PAR1b S l1 S -3B1');
+  assert.ok(decoded.ctBody.includes('S l2 S -3B2'), 'Expected native PAR1b S l2 S -3B2');
+  assert.ok(/PAV1 O\d+ .* 180 0 4495368/.test(decoded.ctBody), 'Expected native GDI PAV1 (4495368)');
+  assert.ok(/PAV1S O\d+ .* 0 0 4894728/.test(decoded.ctBody), 'Expected native GDI PAV1S (4894728)');
+  assert.ok(/PAR1b O\d+ .* 90 0 4628483/.test(decoded.ctBody), 'Expected native GDI PAR1b (4628483)');
+  assert.ok(/PSW1 O\d+ .* 0 0 2938888/.test(decoded.ctBody), 'Expected native GDI PSW1 (2938888)');
 
   // Verify UEConnection solenoid hitboxes sit near the valve ends (left/right), NOT centered in the middle of the valve body
   const ctLines = decoded.ctBody.split('\n');

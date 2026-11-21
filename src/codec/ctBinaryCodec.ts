@@ -47,27 +47,29 @@ export interface DecodedCtContainer {
   decompressedByteLength: number;
 }
 
-// Default minimal FluidSIM 4.5 obfuscated header lines (DIN A4 sheet) derived from verified golden 01.ct.
+// Default minimal FluidSIM 4.5 obfuscated header lines (DIN A4 landscape sheet) derived from verified golden 01.ct.
 const DEFAULT_CT_HEADER_LINES_HEX: readonly string[] = [
   '3e6c75423f56daaf205628b0c36c08bbb4654292342034e337e34a2cd94f204ad92b347a2b2cd9',
   '8282',
   'b3c2ce2082494d09201c49b8a82082f61c1c1c1c1c1c2082',
   '092049201c20a7',
-  '1c201c2057821c205749a72082',
+  '1c201c205749a72057821c2082',
   '1c',
   '1c',
+  'b3d1b37f55ddce305a7f2057201c2057821c205749a72082',
   '50c2e8b3557fcece',
 ];
 
-// Default FluidSIM 4.5 DIN A3 header lines derived from verified golden 02..05.ct (H2 configures A3 sheet width).
+// Default FluidSIM 4.5 DIN A3 landscape header lines (420 x 297 mm) derived from verified golden 02..05.ct & distributing station.ct.
 const DEFAULT_CT_A3_HEADER_LINES_HEX: readonly string[] = [
   '3e6c75423f56daaf205628b0c36c08bbb4654292342034e337e34a2cd94f204ad92b347a2b2cd9',
   '8282',
   'b3c2ce2082caa8ca201c49a8822082f61c1c1c1c1c1c2082',
   '092049201c20a7',
-  '1c201c2057821c205749a72082',
+  '1c201c20a8571c205749a72082',
   '1c',
   '1c',
+  'b3d1b37f55ddce305a7f2009201c205749a720a8571c2082',
   '50c2e8b3557fcece',
 ];
 

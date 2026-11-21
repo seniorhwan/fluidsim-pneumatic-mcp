@@ -494,8 +494,29 @@ export function buildValveSym(
  * `DRSV2_pneu` One-way flow control valve (`46080 x 61440`, `45 x 60` * 1024).
  * Vertical main ports: port 2 at top (23040, 0), port 1 at bottom (23040, 61440).
  * Left branch: adjustable throttle (arcs + diagonal arrow). Right branch: bypass check valve (ball + V-seat).
+ * Compensates check-valve seat orientation for `rotDeg === 180` so `freeFlowDirection='1_to_2'`
+ * always renders free flow UP (meter-out) visually in FluidSIM.
  */
-export function buildFlowControlOneWaySym(): string[] {
+export function buildFlowControlOneWaySym(
+  rotDeg = 0,
+  freeFlowDirection: '1_to_2' | '2_to_1' = '1_to_2',
+): string[] {
+  const wantLocalUp = (freeFlowDirection === '1_to_2') !== (rotDeg === 180);
+  const checkValveLines = wantLocalUp
+    ? [
+        '1 33792 12288 33792 25600',
+        '1 33792 36864 33792 49152',
+        '3 33792 29696 3072 0 2',
+        '1 28672 30720 33792 36864',
+        '1 38912 30720 33792 36864',
+      ]
+    : [
+        '1 33792 12288 33792 24576',
+        '1 33792 35840 33792 49152',
+        '3 33792 31744 3072 0 2',
+        '1 28672 30720 33792 24576',
+        '1 38912 30720 33792 24576',
+      ];
   return [
     // Main top & bottom stems + horizontal split rails
     '1 23040 0 23040 12288',
@@ -508,12 +529,7 @@ export function buildFlowControlOneWaySym(): string[] {
     '4 20480 30720 6144 133120 235520 0 0 2',
     '1 4096 38912 20480 22528',
     '5 20480 22528 16384 24576 18432 26624 18432 26624 0',
-    // Right bypass check valve (vertical stems + ball circle + V-seat)
-    '1 33792 12288 33792 25600',
-    '1 33792 36864 33792 49152',
-    '3 33792 29696 3072 0 2',
-    '1 28672 30720 33792 36864',
-    '1 38912 30720 33792 36864',
+    ...checkValveLines,
   ];
 }
 

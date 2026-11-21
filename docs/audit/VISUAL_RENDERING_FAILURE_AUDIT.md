@@ -1,9 +1,13 @@
-# FluidSIM 4.5 Visual Rendering & Layout Failure Audit (`v0.2.0` Post-Fix)
+# FluidSIM 4.5 Visual Rendering & Layout Failure Audit (`v0.2.0` Post-Fix -> RESOLVED)
 
 **Date:** 2026-11-21  
-**Commit Audited:** `cac0ba8` (`feat: upgrade project creation and codec reliability`)  
+**Original Commit Audited:** `cac0ba8` (`feat: upgrade project creation and codec reliability`)  
+**Status:** **RESOLVED** (verified end-to-end via MCP stdio + live FluidSIM 4.5 `fl_sim_p.exe` visual inspection in `docs/audit/attempts/v4_fluidsim_verified.png` and `docs/audit/attempts/v4_fluidsim_full_sheet.png`)  
 **Artifact Inspected:** `docs/audit/attempts/distribution_station_recreated.ct` (opened directly in Festo FluidSIM Pneumatics 4.5 `fl_sim_p.exe`)  
 **Golden Reference Compared:** `C:\Users\jethr\OneDrive\Dokumen\Reading material\TA\dokumen ta mps\everything for pneumatics\distributing station.ct` and `fixtures/golden/*.ct`
+
+> [!NOTE]
+> **Resolution Summary:** All 5 visual/codec/layout root causes below (plus the `ROUNDTRIP_RAW_AST_LOST` regression on `circuit_create` + `circuit_apply_patch`, DIN A3 landscape sheet header `420×297`, native GDI flags for `PAV1`/`PAV1S`/`PAR1b`/`PSW1`, `CylDGPPAB` piston rod, `DRSV2_pneu` `180°` un-looped wiring, `S state INT 4` hidden unused ports, and Branch 2 vacuum sub-layer layout) have been fixed and verified with `45/45` unit tests passing and live `fl_sim_p.exe` screenshot verification.
 
 ---
 

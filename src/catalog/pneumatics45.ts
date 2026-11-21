@@ -256,8 +256,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     description: 'Double-acting semi-rotary vane/rack-and-pinion swivel actuator (FluidSIM 4.5 PAR1b, e.g. Festo DSM/DRQD 180 deg) with angular limit sensor markers.',
     keywords: ['swivel', 'semi-rotary', 'rotary actuator', 'vane', '180', 'dsm', 'turn'],
     ports: [
-      { name: 'A', domain: 'pneumatic', role: 'working', required: true, offset: { x: 2.333, y: 13 } },
-      { name: 'B', domain: 'pneumatic', role: 'working', required: true, offset: { x: 7.667, y: 13 } },
+      { name: 'A', domain: 'pneumatic', role: 'working', required: true, offset: { x: 2, y: 12 } },
+      { name: 'B', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 12 } },
     ],
     parameters: [
       { key: 'maxAngleDeg', type: 'number', defaultValue: 180, unit: 'deg', min: 15, max: 360, description: 'Maximum swivel angle (default 180 deg)' },
@@ -279,8 +279,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     description: 'Bidirectional continuous-rotation pneumatic vane/piston air motor.',
     keywords: ['air motor', 'rotary motor', 'pneumatic motor', 'continuous rotation'],
     ports: [
-      { name: 'A', domain: 'pneumatic', role: 'working', required: true, offset: { x: 2.333, y: 13 } },
-      { name: 'B', domain: 'pneumatic', role: 'working', required: true, offset: { x: 7.667, y: 13 } },
+      { name: 'A', domain: 'pneumatic', role: 'working', required: true, offset: { x: 2, y: 12 } },
+      { name: 'B', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 12 } },
     ],
     parameters: [
       { key: 'nominalRpm', type: 'number', defaultValue: 1200, unit: 'rpm', min: 50, max: 20000, description: 'Nominal rotation speed at 6 bar' },
@@ -302,15 +302,15 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     description: 'Venturi vacuum generator (FluidSIM 4.5 PAV1) producing negative gauge pressure on port 1v when port 1 is supplied and port 3 exhausts.',
     keywords: ['vacuum', 'venturi', 'suction nozzle', 'ejector', 'generator', '1v', 'pav1'],
     ports: [
-      { name: '1', domain: 'pneumatic', role: 'supply', required: true, offset: { x: 0, y: 5 } },
-      { name: '3', domain: 'pneumatic', role: 'exhaust', required: true, offset: { x: 12, y: 5 } },
-      { name: '1v', domain: 'pneumatic', role: 'vacuum', required: true, offset: { x: 6, y: 0 } },
+      { name: '1', domain: 'pneumatic', role: 'supply', required: true, offset: { x: 0, y: 6 } },
+      { name: '3', domain: 'pneumatic', role: 'exhaust', required: true, offset: { x: 20, y: 6 } },
+      { name: '1v', domain: 'pneumatic', role: 'vacuum', required: true, offset: { x: 8, y: 0 } },
     ],
     parameters: [
       { key: 'vacuumBar', type: 'number', defaultValue: -0.7, unit: 'bar', min: -0.95, max: -0.1, description: 'Generated gauge vacuum pressure at nominal supply' },
       { key: 'minSupplyBar', type: 'number', defaultValue: 3.0, unit: 'bar', min: 1.0, max: 8.0, description: 'Minimum supply pressure at port 1 to sustain Venturi vacuum' },
     ],
-    defaultSize: { width: 12, height: 10 },
+    defaultSize: { width: 20, height: 10 },
     layoutLayer: 2,
   },
   {
@@ -323,12 +323,12 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     description: 'Vacuum gripper suction cup (FluidSIM 4.5 PAV1S); grips workpiece when port 1v pressure drops below gripThresholdBar and releases on blow-off/vent.',
     keywords: ['suction cup', 'sucker', 'vacuum gripper', 'vacuum', 'pad', '1v', 'pav1s'],
     ports: [
-      { name: '1v', domain: 'pneumatic', role: 'vacuum', required: true, offset: { x: 4, y: 8 } },
+      { name: '1v', domain: 'pneumatic', role: 'vacuum', required: true, offset: { x: 4, y: 0 } },
     ],
     parameters: [
       { key: 'gripThresholdBar', type: 'number', defaultValue: -0.3, unit: 'bar', min: -0.95, max: -0.05, description: 'Gauge vacuum threshold required to grip workpiece' },
     ],
-    defaultSize: { width: 8, height: 8 },
+    defaultSize: { width: 8, height: 7 },
     layoutLayer: 0,
   },
 
@@ -693,14 +693,14 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     keywords: ['pressure switch', 'vacuum switch', 'differential', 'pew', 'psw1', 'sensor', 'b1', '-2b1'],
     ports: [
       { name: 'P1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 0, y: 4 } },
-      { name: 'P2', domain: 'pneumatic', role: 'working', required: false, offset: { x: 8, y: 4 } },
+      { name: 'P2', domain: 'pneumatic', role: 'working', required: false, offset: { x: 17, y: 4 } },
     ],
     parameters: [
       { key: 'pressureBar', type: 'number', defaultValue: -0.5, unit: 'bar', min: -1.0, max: 12.0, description: 'Switching threshold in gauge bar (negative for vacuum switches, e.g. -0.5 bar)' },
       { key: 'hysteresisBar', type: 'number', defaultValue: 0.05, unit: 'bar', min: 0, max: 2.0, description: 'Switching hysteresis band' },
       { key: 'triggerMode', type: 'enum', defaultValue: 'auto', enumValues: ['auto', 'above', 'below'], description: 'auto: below when pressureBar<0, above when pressureBar>=0' },
     ],
-    defaultSize: { width: 8, height: 8 },
+    defaultSize: { width: 17, height: 8 },
     layoutLayer: 1,
   },
   {

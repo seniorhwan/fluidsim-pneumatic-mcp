@@ -50,6 +50,30 @@ export function rotatePortOffset(
   return offset;
 }
 
+/**
+ * Computes effective port offset in mm for both layout routing and `.ct` emission.
+ * For 180-deg meter-out flow-control/throttle valves, keeps port 1 at bottom (valve side)
+ * and port 2 at top (actuator side) so wires never loop over the component body.
+ */
+export function getEffectivePortOffset(comp: ComponentNode, portName: string): { x: number; y: number } {
+  const def = getCatalogComponent(comp.type);
+  const port = getPortDefinition(comp.type, portName);
+  const raw = port?.offset ?? { x: 0, y: 0 };
+  const rot = getEffectiveRotationDeg(comp);
+  if (
+    rot === 180 &&
+    (comp.type === 'flow_control_one_way' || comp.type === 'throttle_valve')
+  ) {
+    return raw;
+  }
+  return rotatePortOffset(
+    raw,
+    def?.defaultSize.width ?? 20,
+    def?.defaultSize.height ?? 12,
+    rot,
+  );
+}
+
 interface LayoutBox {
   comp: ComponentNode;
   x: number;
@@ -130,17 +154,21 @@ export function autoLayoutCircuit(
   const isTallSheet = targetSheetHeightMm >= 260;
   const pneuLayerY: Record<number, number> = isTallSheet
     ? {
-        0: HEADER_SAFE_Y_MM, // Actuators (R_SCHALT sits cleanly above at ~30.7 mm)
-        1: 80, // Flow control / filters / check valves / sensors / branch junctions / venturi
-        2: 145, // Directional control valves (5/2, 4/2, 5/3, 2/2)
-        3: 195, // Manifold buses / backbone junctions / pilot 3/2 valves / logic
-        4: 245, // Air source & Wartungseinheit2 FRL
+        0: HEADER_SAFE_Y_MM, // Actuators & top switches (R_SCHALT sits cleanly above at ~30.7 mm)
+        0.5: 62, // Upper branch junctions (vacuum rail)
+        1: 82, // Flow control / filters / check valves / throttles
+        1.5: 112, // Mid-branch ejectors (PAV1) & hanging suction cups (PAV1S)
+        2: 142, // Directional control valves (5/2, 4/2, 5/3, 2/2, 3/2)
+        3: 185, // Manifold buses / backbone junctions / pilot 3/2 valves / logic
+        4: 205, // Air source & Wartungseinheit2 FRL
       }
     : {
         0: HEADER_SAFE_Y_MM, // Actuators
-        1: 70, // Flow control / quick exhaust / filters
-        2: 105, // Directional control valves
-        3: 140, // Processing / logic / pilot 3/2 / manifolds
+        0.5: 55,
+        1: 72, // Flow control / quick exhaust / filters
+        1.5: 90,
+        2: 108, // Directional control valves
+        3: 142, // Processing / logic / pilot 3/2 / manifolds
         4: 170, // Air source & FRL
       };
 
@@ -241,16 +269,23 @@ export function autoLayoutCircuit(
     };
     branches.sort((a, b) => naturalCompare(branchSortKey(a), branchSortKey(b)));
 
-    // Compute dynamic vertical layer (0..3) for every component inside each branch
+    // Compute dynamic vertical layer (0..3, with 0.5 and 1.5 sub-bands) for every component inside each branch
     const branchLayerOf = new Map<string, number>();
     for (const group of branches) {
       const groupIds = new Set(group.map((c) => c.id));
+      const hasVacuumNozzle = group.some((c) => c.type === 'vacuum_suction_nozzle');
       // First assign base layers for non-junctions
       for (const c of group) {
         if (c.type === 'pneumatic_junction') continue;
         if (c.type === 'vacuum_suction_nozzle') {
-          // Venturi nozzle sits between the vacuum line (Layer 1) and supply valve (Layer 2) -> Layer 1
-          branchLayerOf.set(c.id, 1);
+          // Venturi nozzle sits between the vacuum rail (Layer 1) and supply valve (Layer 2) -> Layer 1.5
+          branchLayerOf.set(c.id, 1.5);
+        } else if (hasVacuumNozzle && c.type === 'vacuum_sucker') {
+          // Suction cup hangs cleanly below filter/junction in Layer 1.5
+          branchLayerOf.set(c.id, 1.5);
+        } else if (hasVacuumNozzle && c.type === 'pressure_switch_differential') {
+          // Vacuum pressure switch sits at the top of the branch (Layer 0)
+          branchLayerOf.set(c.id, 0);
         } else if (c.type === 'valve_3_2') {
           // A 3/2 valve directly driving an actuator, flow-control, throttle, quick-exhaust, or venturi
           // acts as a final control valve (Layer 2) rather than a pilot signal valve (Layer 3).
@@ -283,7 +318,7 @@ export function autoLayoutCircuit(
               if (nc && !TERMINATOR_TYPES.has(nc.type)) {
                 ownerLayer =
                   nc.type === 'vacuum_suction_nozzle'
-                    ? 1
+                    ? 1.5
                     : Math.min(3, getCatalogComponent(nc.type)?.layoutLayer ?? 2);
                 break;
               }
@@ -296,8 +331,7 @@ export function autoLayoutCircuit(
         }
       }
       // Two-pass dynamic layer assignment for branch-internal pneumatic_junctions:
-      // never dump branch junctions down into Layer 3; place them at the minimum layer
-      // of their connected branch neighbors (clamped to 0..2).
+      // place vacuum/branch junctions in sub-layer 0.5 (cleanly above Layer 1 throttles/filters, below Layer 0 switches).
       for (let pass = 0; pass < 3; pass++) {
         for (const c of group) {
           if (c.type !== 'pneumatic_junction') continue;
@@ -313,7 +347,7 @@ export function autoLayoutCircuit(
             }
           }
           if (Number.isFinite(best)) {
-            branchLayerOf.set(c.id, Math.max(0, Math.min(2, best)));
+            branchLayerOf.set(c.id, hasVacuumNozzle ? 0.5 : Math.max(0, Math.min(2, best)));
           }
         }
       }
@@ -400,7 +434,9 @@ export function autoLayoutCircuit(
           return naturalCompare(a.label || a.id, b.label || b.id);
         });
 
-        const itemGap = MIN_CLEARANCE_MM + 4;
+        const itemGap = group.some((c) => c.type === 'vacuum_suction_nozzle')
+          ? MIN_CLEARANCE_MM + 10
+          : MIN_CLEARANCE_MM + 4;
         // Pack into 1 or more tidy sub-rows within colSpan
         const rows: ComponentNode[][] = [];
         let curRow: ComponentNode[] = [];
@@ -448,7 +484,37 @@ export function autoLayoutCircuit(
       colCursorX = snap(colRight + colGapMm);
     }
 
-    // Place Layer 3 Backbone (manifolds, supply junctions, backbone terminators) cleanly below branches
+    // Place Layer 4 Air Supply (air_source -> air_service_unit) cleanly at bottom-left,
+    // and Layer 3 Backbone (manifolds, supply junctions, terminators) cleanly to the right of FRL
+    const backboneLayer4 = pneuUnplaced
+      .filter((c) => backboneIds.has(c.id) && (c.type === 'air_source' || c.type === 'air_service_unit'))
+      .sort((a, b) => {
+        const ra = a.type === 'air_source' ? 0 : 1;
+        const rb = b.type === 'air_source' ? 0 : 1;
+        if (ra !== rb) return ra - rb;
+        return naturalCompare(a.id, b.id);
+      });
+
+    let backboneBottomY = maxBranchBottomY;
+    let supplyRightX = MARGIN_X_MM;
+    const baseBusY = snap(Math.max(pneuLayerY[3] ?? 185, maxBranchBottomY + MIN_CLEARANCE_MM + 6));
+    if (backboneLayer4.length > 0) {
+      let cursorX = MARGIN_X_MM;
+      for (const comp of backboneLayer4) {
+        const { w, h } = getRotatedDimensions(comp);
+        const rot = getEffectiveRotationDeg(comp);
+        comp.layout = {
+          x: snap(cursorX),
+          y: snap(baseBusY),
+          rotationDeg: rot,
+        };
+        cursorX = snap(comp.layout.x + w + MIN_CLEARANCE_MM + 4);
+        supplyRightX = Math.max(supplyRightX, comp.layout.x + w);
+        maxPneuX = Math.max(maxPneuX, comp.layout.x + w);
+        backboneBottomY = Math.max(backboneBottomY, comp.layout.y + h);
+      }
+    }
+
     const backboneLayer3 = pneuUnplaced
       .filter((c) => backboneIds.has(c.id) && c.type !== 'air_source' && c.type !== 'air_service_unit')
       .sort((a, b) => {
@@ -460,18 +526,18 @@ export function autoLayoutCircuit(
         return naturalCompare(a.label || a.id, b.label || b.id);
       });
 
-    let backboneBottomY = maxBranchBottomY;
     if (backboneLayer3.length > 0) {
+      const busStartX = supplyRightX > MARGIN_X_MM ? snap(supplyRightX + MIN_CLEARANCE_MM + 6) : MARGIN_X_MM;
       const gapX = MIN_CLEARANCE_MM + 8;
-      let rowY = snap(Math.max(pneuLayerY[3] ?? 195, maxBranchBottomY + MIN_CLEARANCE_MM + 6));
-      let cursorX = MARGIN_X_MM;
+      let rowY = baseBusY;
+      let cursorX = busStartX;
       let rowMaxH = 0;
 
       for (const comp of backboneLayer3) {
         const { w, h } = getRotatedDimensions(comp);
         const rot = getEffectiveRotationDeg(comp);
-        if (cursorX > MARGIN_X_MM && cursorX + w > pneuMaxRightMm) {
-          cursorX = MARGIN_X_MM;
+        if (cursorX > busStartX && cursorX + w > pneuMaxRightMm) {
+          cursorX = busStartX;
           rowY = snap(rowY + Math.max(rowMaxH, 8) + MIN_CLEARANCE_MM + 6);
           rowMaxH = 0;
         }
@@ -482,33 +548,6 @@ export function autoLayoutCircuit(
         };
         cursorX = snap(comp.layout.x + w + gapX);
         rowMaxH = Math.max(rowMaxH, h);
-        maxPneuX = Math.max(maxPneuX, comp.layout.x + w);
-        backboneBottomY = Math.max(backboneBottomY, comp.layout.y + h);
-      }
-    }
-
-    // Place Layer 4 Air Supply (air_source -> air_service_unit) cleanly at bottom-left
-    const backboneLayer4 = pneuUnplaced
-      .filter((c) => backboneIds.has(c.id) && (c.type === 'air_source' || c.type === 'air_service_unit'))
-      .sort((a, b) => {
-        const ra = a.type === 'air_source' ? 0 : 1;
-        const rb = b.type === 'air_source' ? 0 : 1;
-        if (ra !== rb) return ra - rb;
-        return naturalCompare(a.id, b.id);
-      });
-
-    if (backboneLayer4.length > 0) {
-      const supplyY = snap(Math.max(pneuLayerY[4] ?? 240, backboneBottomY + MIN_CLEARANCE_MM + 6));
-      let cursorX = MARGIN_X_MM;
-      for (const comp of backboneLayer4) {
-        const { w, h } = getRotatedDimensions(comp);
-        const rot = getEffectiveRotationDeg(comp);
-        comp.layout = {
-          x: snap(cursorX),
-          y: snap(supplyY),
-          rotationDeg: rot,
-        };
-        cursorX = snap(comp.layout.x + w + MIN_CLEARANCE_MM + 10);
         maxPneuX = Math.max(maxPneuX, comp.layout.x + w);
         backboneBottomY = Math.max(backboneBottomY, comp.layout.y + h);
       }
@@ -608,22 +647,8 @@ export function autoLayoutCircuit(
       return { ...edge };
     }
 
-    const fromDef = getCatalogComponent(fromComp.type);
-    const toDef = getCatalogComponent(toComp.type);
-    const fromPort = getPortDefinition(fromComp.type, edge.from.port);
-    const toPort = getPortDefinition(toComp.type, edge.to.port);
-    const fromRotOffset = rotatePortOffset(
-      fromPort?.offset ?? { x: 0, y: 0 },
-      fromDef?.defaultSize.width ?? 20,
-      fromDef?.defaultSize.height ?? 12,
-      getEffectiveRotationDeg(fromComp),
-    );
-    const toRotOffset = rotatePortOffset(
-      toPort?.offset ?? { x: 0, y: 0 },
-      toDef?.defaultSize.width ?? 20,
-      toDef?.defaultSize.height ?? 12,
-      getEffectiveRotationDeg(toComp),
-    );
+    const fromRotOffset = getEffectivePortOffset(fromComp, edge.from.port);
+    const toRotOffset = getEffectivePortOffset(toComp, edge.to.port);
 
     const p1: Point2D = {
       x: Math.round((fromComp.layout.x + fromRotOffset.x) * 100) / 100,

@@ -8,7 +8,7 @@ import type {
 } from '../contracts/circuit';
 import type { DecodedCtContainer } from './ctBinaryCodec';
 import { getCatalogComponent, getPortDefinition } from '../catalog/pneumatics45';
-import { autoLayoutCircuit, rotatePortOffset } from '../authoring/layoutRouter';
+import { autoLayoutCircuit, getEffectivePortOffset, rotatePortOffset } from '../authoring/layoutRouter';
 import {
   CtSymbolAllocator,
   buildCheckValveSyms,
@@ -82,6 +82,10 @@ export interface PreservedCtSections {
   originalCtBody: string;
   originalSemanticFingerprint: string;
   preservedDecorativeObjects: string[];
+}
+
+function getCompLabelProp(props: string[]): string | undefined {
+  return getScalarProp(props, '_MCP_LABEL') ?? getScalarProp(props, 'label');
 }
 
 function getScalarProp(props: string[], key: string): string | undefined {
@@ -741,7 +745,7 @@ export function parseCtContainerToDocument(
         obj.cls === 'CompressorFixedP'
           ? getNumberProp(obj.props, 'P_LIM', 6.0)
           : getNumberProp(obj.props, 'P_SOLL', 6.0);
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'air_service_unit',
@@ -753,7 +757,7 @@ export function parseCtContainerToDocument(
       };
     } else if (obj.cls === 'FilterP') {
       const nominalFlowLMin = getNumberProp(obj.props, 'NN_FLOW', 500);
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'air_filter',
@@ -766,19 +770,20 @@ export function parseCtContainerToDocument(
     } else if (obj.cls === 'PAV1') {
       const vacuumBar = getNumberProp(obj.props, '_MCP_VAC_BAR', -0.7);
       const minSupplyBar = getNumberProp(obj.props, '_MCP_MIN_SUP', 3.0);
-      const lbl = getScalarProp(obj.props, 'label');
+      const origRot = getNumberProp(obj.props, '_MCP_ORIG_ROT', rotDeg);
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'vacuum_suction_nozzle',
         ...(lbl ? { label: lbl } : {}),
         params: { vacuumBar, minSupplyBar },
-        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
-        layout,
+        ...(origRot !== 0 ? { rotationDeg: normalizeRotation(origRot) } : {}),
+        layout: { ...layout, rotationDeg: normalizeRotation(origRot) },
         rawMetadata,
       };
     } else if (obj.cls === 'PAV1S') {
       const gripThresholdBar = getNumberProp(obj.props, '_MCP_GRIP_BAR', -0.3);
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'vacuum_sucker',
@@ -793,14 +798,33 @@ export function parseCtContainerToDocument(
       const initialAngleDeg = getNumberProp(obj.props, '_MCP_INIT_DEG', 0);
       const torqueNm = getNumberProp(obj.props, '_MCP_TORQUE', 5);
       const externalLoadNm = getNumberProp(obj.props, '_MCP_LOAD_NM', 0);
-      const lbl = getScalarProp(obj.props, 'label');
+      const origRot = getNumberProp(obj.props, '_MCP_ORIG_ROT', rotDeg);
+      const lbl = getCompLabelProp(obj.props);
+      let distanceRule: DistanceRuleMarker[] | undefined;
+      const drJson = getScalarProp(obj.props, '_MCP_DR_JSON');
+      if (drJson) {
+        try {
+          distanceRule = JSON.parse(Buffer.from(drJson, 'base64').toString('utf8')) as DistanceRuleMarker[];
+        } catch {
+          distanceRule = undefined;
+        }
+      }
+      if (!distanceRule) {
+        const l1 = getScalarProp(obj.props, 'l1');
+        const l2 = getScalarProp(obj.props, 'l2');
+        const markers: DistanceRuleMarker[] = [];
+        if (l1 && l1 !== '0') markers.push({ label: l1, positionMm: 0, toleranceMm: 2 });
+        if (l2 && l2 !== '0') markers.push({ label: l2, positionMm: maxAngleDeg, toleranceMm: 2 });
+        if (markers.length > 0) distanceRule = markers;
+      }
       node = {
         id,
         type: 'swivel_drive',
         ...(lbl ? { label: lbl } : {}),
         params: { maxAngleDeg, initialAngleDeg, torqueNm, externalLoadNm },
-        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
-        layout,
+        ...(distanceRule ? { distanceRule } : {}),
+        ...(origRot !== 0 ? { rotationDeg: normalizeRotation(origRot) } : {}),
+        layout: { ...layout, rotationDeg: normalizeRotation(origRot) },
         rawMetadata,
       };
       cylinderNodes.push({
@@ -832,7 +856,7 @@ export function parseCtContainerToDocument(
       const rodDiameterMm = Math.max(2, Math.round(20 * Math.sqrt(rodAreaCm2 / Math.PI)));
       const externalLoadN = Math.max(0, getNumberProp(obj.props, 'F', 0));
       const initialPositionMm = Math.max(0, getNumberProp(obj.props, 'S', 0));
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
 
       const springForceN = getNumberProp(obj.props, '_MCP_SPRING_N', 25);
       node = {
@@ -881,7 +905,7 @@ export function parseCtContainerToDocument(
       const leftActuation = mapValveActuationSide(obj.props, 'L', leftSol, leftRol);
       const rightActuation = mapValveActuationSide(obj.props, 'R', rightSol, rightRol);
       const nominalFlowLMin = getNumberProp(obj.props, 'NN_FLOW', type === 'valve_3_2' ? 120 : type === 'valve_2_2' ? 200 : 500);
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
 
       const switchedPosR = getScalarProp(obj.props, 'SWITCHED_POS_R') ?? '';
       const switchedNo =
@@ -966,7 +990,7 @@ export function parseCtContainerToDocument(
       };
     } else if (obj.cls === 'CheckValveSpringLoadedP' || obj.cls === 'CheckValvePilotOperatedSpringLoadedP') {
       const crackingPressureBar = getNumberProp(obj.props, 'P_V', 0.3);
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'check_valve_spring',
@@ -989,7 +1013,7 @@ export function parseCtContainerToDocument(
       };
     } else if (obj.cls === 'DRSV2_pneu') {
       const pGates = objGates.filter((g) => objByIdx.get(g.childId)?.cls === 'PConnection');
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
       if (pGates.length >= 3) {
         node = {
           id,
@@ -1032,7 +1056,7 @@ export function parseCtContainerToDocument(
       const triggerModeRaw = getScalarProp(obj.props, '_MCP_TRIG_MODE');
       const triggerMode =
         triggerModeRaw === 'above' || triggerModeRaw === 'below' ? triggerModeRaw : 'auto';
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'pressure_switch_differential',
@@ -1354,14 +1378,21 @@ export function parseCtContainerToDocument(
         return { compId, port: mappedPort, cls: parentObj?.cls ?? '', portObj };
       }
 
-      const port =
-        parentObj?.cls === 'CompressorFixedP'
-          ? p.gateNum === 1
-            ? '2'
-            : p.gateNum === 2
-              ? '1'
-              : undefined
-          : gateNumberToPortName(compType, p.gateNum);
+      let port: string | undefined;
+      if (parentObj?.cls === 'CompressorFixedP') {
+        port = p.gateNum === 1 ? '2' : p.gateNum === 2 ? '1' : undefined;
+      } else if (parentObj?.cls === 'PAV1') {
+        const pCount = (gatesByParent.get(p.parentId) ?? []).filter(
+          (g) => objByIdx.get(g.childId)?.cls === 'PConnection',
+        ).length;
+        if (pCount === 2) {
+          port = p.gateNum === 1 ? '1' : p.gateNum === 2 ? '1v' : undefined;
+        } else {
+          port = gateNumberToPortName(compType, p.gateNum);
+        }
+      } else {
+        port = gateNumberToPortName(compType, p.gateNum);
+      }
       if (!port) return undefined;
       return { compId, port, cls: parentObj?.cls ?? '', portObj: objByIdx.get(endpointIdx) };
     }
@@ -1577,6 +1608,35 @@ export function parseCtContainerToDocument(
     ? filePath.replace(/^.*[\\/]/, '').replace(/\.ct$/i, '')
     : 'FluidSIM 4.5 Circuit';
 
+  // Synthesize embedded exhaust_silencer on PAV1 port 3 (when PAV1 uses 2-gate native GDI layout)
+  for (let objIdx = 0; objIdx < ast.objects.length; objIdx++) {
+    const obj = ast.objects[objIdx];
+    if (obj.cls !== 'PAV1') continue;
+    const exh3Id = getScalarProp(obj.props, '_MCP_EXH_3_ID');
+    if (!exh3Id) continue;
+    const ownerCompId = compIdByObjIdx.get(objIdx);
+    if (!ownerCompId) continue;
+    const exh3EdgeId = getScalarProp(obj.props, '_MCP_EXH_3_EDGE_ID');
+    const exhId = allocId(exh3Id);
+    const exhEdgeId = allocEdgeId(exh3EdgeId || `E_EXH_${ownerCompId}_3`);
+    components.push({
+      id: exhId,
+      type: 'exhaust_silencer',
+      params: {},
+      layout: {
+        x: Math.round((obj.x2 / FS_UNIT_PER_MM) * 10) / 10,
+        y: Math.round((obj.y1 / FS_UNIT_PER_MM) * 10) / 10,
+      },
+      rawMetadata: { embeddedExType: 'EX3', ownerPortObjId: obj.objId },
+    });
+    connections.push({
+      id: exhEdgeId,
+      from: { componentId: ownerCompId, port: '3' },
+      to: { componentId: exhId, port: '1' },
+      domain: 'pneumatic',
+    });
+  }
+
   // Preserve sheet dimensions: use explicit MCP sheet metadata if present, otherwise derive from extents (DIN A4 vs DIN A3)
   let maxCompXMm = 0;
   let maxCompYMm = 0;
@@ -1735,6 +1795,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
   const occupiedRects: RawRect[] = [];
   const labelCandidates: Array<{
     compId: string;
+    compType: string;
     label: string;
     x1: number;
     y1: number;
@@ -1798,10 +1859,12 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       case 'air_reservoir':
       case 'quick_exhaust_valve':
       case 'pressure_regulator':
-      case 'pressure_switch_differential':
       case 'pressure_gauge':
-      case 'vacuum_sucker':
         return { baseW: 24576, baseH: 24576 };
+      case 'pressure_switch_differential':
+        return { baseW: 52224, baseH: 24576 };
+      case 'vacuum_sucker':
+        return { baseW: 24576, baseH: 21504 };
       case 'pneumatic_junction':
       case 'electrical_junction':
         return { baseW: 12288, baseH: 12288 };
@@ -1815,7 +1878,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       case 'air_motor':
         return { baseW: 30720, baseH: 39936 };
       case 'vacuum_suction_nozzle':
-        return { baseW: 36864, baseH: 30720 };
+        return { baseW: 61440, baseH: 30720 };
       case 'valve_2_2':
       case 'valve_3_2':
       case 'valve_4_2':
@@ -1892,10 +1955,13 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
 
     const catDef = getCatalogComponent(comp.type);
     const isPneumaticLabeled =
-      Boolean(comp.label && comp.label.trim().length > 0) && (catDef?.layoutLayer ?? 3) < 10;
+      Boolean(comp.label && comp.label.trim().length > 0) &&
+      (catDef?.layoutLayer ?? 3) < 10 &&
+      comp.type !== 'pneumatic_manifold';
     if (isPneumaticLabeled && comp.label) {
       labelCandidates.push({
         compId: comp.id,
+        compType: comp.type,
         label: comp.label.trim(),
         x1,
         y1,
@@ -1913,19 +1979,21 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       explicitRawOffset?: { x: number; y: number },
     ): number => {
       const pid = allocObjId();
-      let rawOffX: number;
-      let rawOffY: number;
+      let cx: number;
+      let cy: number;
       if (explicitRawOffset) {
-        rawOffX = explicitRawOffset.x;
-        rawOffY = explicitRawOffset.y;
+        const rotOff = rotatePortOffset(explicitRawOffset, baseW, baseH, rot);
+        cx = x1 + Math.round(rotOff.x);
+        cy = y1 + Math.round(rotOff.y);
+      } else if (portName) {
+        const effOff = getEffectivePortOffset(comp, portName);
+        cx = x1 + Math.round(effOff.x * FS_UNIT_PER_MM);
+        cy = y1 + Math.round(effOff.y * FS_UNIT_PER_MM);
       } else {
-        const portDef = portName ? getPortDefinition(comp.type, portName) : undefined;
-        rawOffX = portDef ? Math.round(portDef.offset.x * FS_UNIT_PER_MM) : gateNum * 3072;
-        rawOffY = portDef ? Math.round(portDef.offset.y * FS_UNIT_PER_MM) : 0;
+        const rotOff = rotatePortOffset({ x: gateNum * 3072, y: 0 }, baseW, baseH, rot);
+        cx = x1 + Math.round(rotOff.x);
+        cy = y1 + Math.round(rotOff.y);
       }
-      const rotOff = rotatePortOffset({ x: rawOffX, y: rawOffY }, baseW, baseH, rot);
-      const cx = x1 + Math.round(rotOff.x);
-      const cy = y1 + Math.round(rotOff.y);
       const px1 = cx - 5120;
       const py1 = cy - 5120;
       const px2 = cx + 5120;
@@ -1994,24 +2062,41 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       objectBlocks.push(drLines.join('\n'));
     };
 
+    const isPortWired = (portName: string): boolean =>
+      workingDoc.connections.some(
+        (e) =>
+          (e.from.componentId === comp.id && e.from.port === portName) ||
+          (e.to.componentId === comp.id && e.to.port === portName),
+      );
+
+    const addValvePilotPort = (gateNum: number, portName: string, side: 'L' | 'R'): void => {
+      const act = side === 'L' ? comp.leftActuation : comp.rightActuation;
+      const hidden = act?.type !== 'pneumatic_pilot' && !isPortWired(portName);
+      const props = pPortProps(portName);
+      if (hidden) props.push(' S state INT 4');
+      addPortObj(gateNum, 'PConnection', portName, props);
+    };
+
     const emitValveActuationPorts = (startGate: number): void => {
+      const hasLeftSol = comp.leftActuation?.type === 'solenoid';
+      const hasRightSol = comp.rightActuation?.type === 'solenoid';
       addPortObj(
         startGate,
         'UEConnection',
         undefined,
-        comp.leftActuation?.type === 'solenoid' && comp.leftActuation.label
+        hasLeftSol && comp.leftActuation?.label
           ? [` S label S ${comp.leftActuation.label}`]
-          : [],
-        { x: 0, y: 24576 },
+          : [' S state INT 4'],
+        { x: -6144, y: 24576 },
       );
       addPortObj(
         startGate + 1,
         'UEConnection',
         undefined,
-        comp.rightActuation?.type === 'solenoid' && comp.rightActuation.label
+        hasRightSol && comp.rightActuation?.label
           ? [` S label S ${comp.rightActuation.label}`]
-          : [],
-        { x: baseW, y: 24576 },
+          : [' S state INT 4'],
+        { x: baseW + 6144, y: 24576 },
       );
       addPortObj(
         startGate + 2,
@@ -2034,7 +2119,8 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     };
 
     const idProp = ` S _MCP_ID S ${comp.id}`;
-    const labelProp = comp.label ? [` S label S ${comp.label}`] : [];
+    const labelProp = comp.label ? [` S _MCP_LABEL S ${comp.label}`] : [];
+    const elecLabelProp = comp.label ? [` S label S ${comp.label}`] : [];
 
     switch (comp.type) {
       case 'air_source': {
@@ -2198,32 +2284,51 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       case 'vacuum_suction_nozzle': {
         const vacuumBar = Number(comp.params.vacuumBar ?? -0.7);
         const minSupplyBar = Number(comp.params.minSupplyBar ?? 3.0);
-        const vacSym = symAlloc.alloc(buildVacuumNozzleSym());
+        const visualRot = rot === 0 ? 180 : rot;
+        const exh3 = embeddedExhaustByPort.get(`${comp.id}:3`);
+        const hasNonExhPort3 =
+          !exh3 &&
+          workingDoc.connections.some(
+            (e) =>
+              (e.from.componentId === comp.id && e.from.port === '3') ||
+              (e.to.componentId === comp.id && e.to.port === '3'),
+          );
         objectBlocks.push(
           [
-            `PAV1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3527683`,
+            `PAV1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${visualRot} ${flip} 4495368`,
             idProp,
             ...labelProp,
-            ` S dxf_prim_list V ${vacSym}`,
+            ...(rot !== visualRot ? [` S _MCP_ORIG_ROT I ${rot}`] : []),
             ' S FLIPPED I 1',
+            ' F con_descr1 x_offset I -4',
+            ' F con_descr1 y_offset I -9',
+            ' F con_descr2 x_offset I 11',
+            ' F con_descr2 y_offset I 4',
             ` S _MCP_VAC_BAR F ${vacuumBar}`,
             ` S _MCP_MIN_SUP F ${minSupplyBar}`,
+            ...(exh3
+              ? [` S _MCP_EXH_3_ID S ${exh3.exhId}`, ` S _MCP_EXH_3_EDGE_ID S ${exh3.edgeId}`]
+              : []),
           ].join('\n'),
         );
         addPortObj(1, 'PConnection', '1', pPortProps('1'));
-        addPortObj(2, 'PConnection', '3', pPortProps('3'));
-        addPortObj(3, 'PConnection', '1v', pPortProps('1v'));
+        if (hasNonExhPort3) {
+          addPortObj(2, 'PConnection', '3', pPortProps('3'));
+          addPortObj(3, 'PConnection', '1v', pPortProps('1v'));
+        } else {
+          addPortObj(2, 'PConnection', '1v', pPortProps('1v'));
+        }
         break;
       }
       case 'vacuum_sucker': {
         const gripThresholdBar = Number(comp.params.gripThresholdBar ?? -0.3);
-        const cupSym = symAlloc.alloc(buildVacuumSuckerSym());
         objectBlocks.push(
           [
-            `PAV1S O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3527683`,
+            `PAV1S O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4894728`,
             idProp,
             ...labelProp,
-            ` S dxf_prim_list V ${cupSym}`,
+            ' F con_descr1 x_offset I -10',
+            ' F con_descr1 y_offset I 4',
             ` S _MCP_GRIP_BAR F ${gripThresholdBar}`,
           ].join('\n'),
         );
@@ -2235,25 +2340,51 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const initDeg = Number(comp.params.initialAngleDeg ?? 0);
         const torqueNm = Number(comp.params.torqueNm ?? 5);
         const loadNm = Number(comp.params.externalLoadNm ?? 0);
-        const swvSym = symAlloc.alloc(buildSwivelDriveSym());
+        const visualRot = rot === 0 ? 90 : rot;
+        const l1Label = comp.distanceRule?.[0]?.label ?? '';
+        const l2Label = comp.distanceRule?.[1]?.label ?? '';
+        const drB64 =
+          comp.distanceRule && comp.distanceRule.length > 0
+            ? Buffer.from(JSON.stringify(comp.distanceRule), 'utf8').toString('base64')
+            : '';
         objectBlocks.push(
           [
-            `PAR1b O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4986883`,
+            `PAR1b O${parentId} ${x1} ${y1} ${x2} ${y2} ${visualRot} ${flip} 4628483`,
             idProp,
             ...labelProp,
-            ` S dxf_prim_list V ${swvSym}`,
+            ...(rot !== visualRot ? [` S _MCP_ORIG_ROT I ${rot}`] : []),
             ' S ALPHA_FEST B T',
             ` S ALPHA F ${maxAngleDeg}`,
-            ' S l1 F 0',
-            ' S l2 F 0',
+            ' S S_RESET_FEST B T',
+            ' S S_RESET F 0',
+            ' S S_FEST B T',
+            ' S S F 0',
+            ' S V_S_FEST B T',
+            ' S V_S F 0.1',
+            ' S FF_FEST B T',
+            ' S FF F 0.1',
+            ' S M_EXT_FEST B T',
+            ' S M_EXT F 0',
+            ' S MOI_FEST B T',
+            ' S MOI F 0.0001',
+            ' F con_descr1 x_offset I 2',
+            ' F con_descr1 y_offset I -10',
+            ' F con_descr2 x_offset I 2',
+            ' F con_descr2 y_offset I 12',
+            ' F label_pos x_offset I 0',
+            ' F label_pos y_offset I 0',
+            ' F label_pos2 x_offset I 0',
+            ' F label_pos2 y_offset I 0',
+            ...(l1Label ? [` S l1 S ${l1Label}`] : []),
+            ...(l2Label ? [` S l2 S ${l2Label}`] : []),
+            ...(drB64 ? [` S _MCP_DR_JSON S ${drB64}`] : []),
             ...(initDeg !== 0 ? [` S _MCP_INIT_DEG F ${initDeg}`] : []),
             ...(torqueNm !== 5 ? [` S _MCP_TORQUE F ${torqueNm}`] : []),
             ...(loadNm !== 0 ? [` S _MCP_LOAD_NM F ${loadNm}`] : []),
           ].join('\n'),
         );
-        addPortObj(1, 'PConnection', 'A', pPortProps('A'), { x: 7168, y: 39936 });
-        addPortObj(2, 'PConnection', 'B', pPortProps('B'), { x: 23552, y: 39936 });
-        emitDistanceRule(comp);
+        addPortObj(1, 'PConnection', 'A', pPortProps('A'), { x: 6144, y: 36864 });
+        addPortObj(2, 'PConnection', 'B', pPortProps('B'), { x: 24576, y: 36864 });
         break;
       }
       case 'cylinder_single_acting':
@@ -2271,18 +2402,47 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const cylSyms = buildCylinderSyms(isSac);
         const bodySym = symAlloc.alloc(cylSyms.body);
         const rodSym = symAlloc.alloc(cylSyms.rod);
+        // Reserve piston rod overhang to the right so labels never touch the rod
+        occupiedRects.push({ x1: x2, y1, x2: x2 + 46080, y2 });
         const lines = [
           `CylDGPPAB O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4986883`,
           idProp,
           ...labelProp,
           ` S dxf_prim_list V ${bodySym}`,
-          ` S dxf_prim_list2 V ${rodSym}`,
           ' S description_FEST B T',
           ` S description S ${isSac ? 'Zylinder, einfachwirkend' : 'Zylinder, doppeltwirkend'}`,
+          ' S ALPHA_FEST B T',
+          ' S ALPHA F 0',
+          ' S FRICTION_FEST B T',
+          ' S FRICTION F 0',
+          ' S FRICTION_BA_FEST B T',
+          ' S FRICTION_BA F 0',
+          ' S FRICTION_SEL I 0',
+          ' S GLEAK_FEST B T',
+          ' S GLEAK F 0',
+          ' S MASS_FEST B T',
+          ' S MASS F 0',
+          ' S A_K_RIGHT_FEST B T',
+          ' S A_K_RIGHT F -1',
+          ' S A_R_LEFT_FEST B T',
+          ' S A_R_LEFT F -1',
+          ' S piston_FEST B T',
+          ' S piston S CP_CA',
+          ' F piston x_pos I 0',
+          ' F piston y_pos I -8',
+          ' F piston stroke I 38',
+          ' F piston length I 74',
+          ' F piston f_offset_x I 7',
+          ' F piston f_offset_y I -3',
+          ' F piston only_top_rule B FALSE',
+          ' F piston both_sides_rule B FALSE',
           ' S MoName_FEST B T',
           ` S MoName S ${isSac ? 'Pneu.Actuator.CylinderSA' : 'Pneu.Actuator.CylinderDA'}`,
+          ` S dxf_prim_list2 V ${rodSym}`,
           ' S F_FEST B T',
           ` S F F ${extLoad}`,
+          ' S S_RESET_FEST B T',
+          ` S S_RESET F ${initPos}`,
           ' S S_FEST B T',
           ` S S F ${initPos}`,
           ' S HUB_FEST B T',
@@ -2291,12 +2451,17 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
           ` S A_K F ${areaCap}`,
           ' S A_R_FEST B T',
           ` S A_R F ${areaRing}`,
+          ' S CONSTANT_FORCE B T',
+          ' S FORCE_PROFILE_FEST B T',
+          ' S FORCE_PROFILE S 0 0;5000 0;',
+          ' S SENSING B T',
+          ' S SLEDGE B F',
           ' S PISTON_COUNT I 1',
           ' S PISTON_R B T',
           ...(isSac
             ? [' S SPRING_R B T', ...(springForceN !== 25 ? [` S _MCP_SPRING_N F ${springForceN}`] : [])]
             : cushioning
-              ? [' S DAMPING_R B T', ' S DAMPING_L B T']
+              ? [' S DAMPING_ADJ_R B T', ' S DAMPING_ADJ_L B T', ' S DAMPING_R B T', ' S DAMPING_L B T']
               : []),
         ];
         objectBlocks.push(lines.join('\n'));
@@ -2365,8 +2530,8 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         );
         addPortObj(1, 'PConnection', '2', pPortProps('2'));
         addPortObj(2, 'PConnection', '1', pPortProps('1'));
-        addPortObj(3, 'PConnection', '12', pPortProps('12'));
-        addPortObj(4, 'PConnection', '10', pPortProps('10'));
+        addValvePilotPort(3, '12', 'L');
+        addValvePilotPort(4, '10', 'R');
         emitValveActuationPorts(5);
         break;
       }
@@ -2412,8 +2577,8 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         addPortObj(1, 'PConnection', '2', pPortProps('2'));
         addPortObj(2, 'PConnection', '1', pPortProps('1'));
         addPortObj(3, 'PConnection', '3', pPortProps('3'));
-        addPortObj(4, 'PConnection', '12', pPortProps('12'));
-        addPortObj(5, 'PConnection', '10', pPortProps('10'));
+        addValvePilotPort(4, '12', 'L');
+        addValvePilotPort(5, '10', 'R');
         emitValveActuationPorts(6);
         break;
       }
@@ -2446,8 +2611,8 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         addPortObj(2, 'PConnection', '2', pPortProps('2'));
         addPortObj(3, 'PConnection', '1', pPortProps('1'));
         addPortObj(4, 'PConnection', '3', pPortProps('3'));
-        addPortObj(5, 'PConnection', '14', pPortProps('14'));
-        addPortObj(6, 'PConnection', '12', pPortProps('12'));
+        addValvePilotPort(5, '14', 'L');
+        addValvePilotPort(6, '12', 'R');
         emitValveActuationPorts(7);
         break;
       }
@@ -2486,15 +2651,15 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         addPortObj(3, 'PConnection', '5', pPortProps('5'));
         addPortObj(4, 'PConnection', '1', pPortProps('1'));
         addPortObj(5, 'PConnection', '3', pPortProps('3'));
-        addPortObj(6, 'PConnection', '14', pPortProps('14'));
-        addPortObj(7, 'PConnection', '12', pPortProps('12'));
+        addValvePilotPort(6, '14', 'L');
+        addValvePilotPort(7, '12', 'R');
         emitValveActuationPorts(8);
         break;
       }
       case 'flow_control_one_way': {
         const openingPct = Number(comp.params.openingPct ?? 50);
         const freeFlow = comp.params.freeFlowDirection === '2_to_1' ? '2_to_1' : '1_to_2';
-        const fcSym = symAlloc.alloc(buildFlowControlOneWaySym());
+        const fcSym = symAlloc.alloc(buildFlowControlOneWaySym(rot, freeFlow));
         objectBlocks.push(
           [
             `DRSV2_pneu O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 6940243`,
@@ -2647,13 +2812,11 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const pBar = Number(comp.params.pressureBar ?? -0.5);
         const hyst = Number(comp.params.hysteresisBar ?? 0.05);
         const trigMode = String(comp.params.triggerMode ?? 'auto');
-        const pswSym = symAlloc.alloc(buildPressureSwitchSym());
         objectBlocks.push(
           [
-            `PSW1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3527683`,
+            `PSW1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 2938888`,
             idProp,
             ...labelProp,
-            ` S dxf_prim_list V ${pswSym}`,
             ' S P_SOLL_FEST B T',
             ` S P_SOLL F ${pBar}`,
             ` S _MCP_HYST F ${hyst}`,
@@ -2661,7 +2824,9 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
           ].join('\n'),
         );
         addPortObj(1, 'PConnection', 'P1', pPortProps('P1'));
-        addPortObj(2, 'PConnection', 'P2', pPortProps('P2'));
+        if (isPortWired('P2')) {
+          addPortObj(2, 'PConnection', 'P2', pPortProps('P2'));
+        }
         break;
       }
       case 'power_24v': {
@@ -2690,7 +2855,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       case 'pushbutton_no': {
         const cls = comp.params.detent ? 'E_S031' : 'E_S011';
         objectBlocks.push(
-          [`${cls} O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4142088`, idProp, ...labelProp].join(
+          [`${cls} O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4142088`, idProp, ...elecLabelProp].join(
             '\n',
           ),
         );
@@ -2705,7 +2870,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             `E_S012 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4454408`,
             idProp,
             ...(isDetent ? [' S _MCP_DETENT B T'] : []),
-            ...labelProp,
+            ...elecLabelProp,
           ].join('\n'),
         );
         addPortObj(1, 'EConnection', '11');
@@ -2720,7 +2885,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             `E_S001 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3665928`,
             idProp,
             ` S SWITCH_TYPE I ${switchType}`,
-            ...labelProp,
+            ...elecLabelProp,
           ].join('\n'),
         );
         addPortObj(1, 'EConnection', '13');
@@ -2735,7 +2900,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             `E_S002 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 1472008`,
             idProp,
             ` S SWITCH_TYPE I ${switchType}`,
-            ...labelProp,
+            ...elecLabelProp,
           ].join('\n'),
         );
         addPortObj(1, 'EConnection', '11');
@@ -2744,7 +2909,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       }
       case 'relay_coil': {
         objectBlocks.push(
-          [`E_K001 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 645133`, idProp, ...labelProp].join(
+          [`E_K001 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 645133`, idProp, ...elecLabelProp].join(
             '\n',
           ),
         );
@@ -2760,7 +2925,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             idProp,
             ' S DELAY_TIME_FEST B T',
             ` S DELAY_TIME F ${delayTenths}`,
-            ...labelProp,
+            ...elecLabelProp,
           ].join('\n'),
         );
         addPortObj(1, 'EConnection', 'A1');
@@ -2777,7 +2942,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             ` S J F ${preset}`,
             ' S N_FEST B T',
             ` S N F ${preset}`,
-            ...labelProp,
+            ...elecLabelProp,
           ].join('\n'),
         );
         addPortObj(1, 'EConnection', 'A1');
@@ -2788,7 +2953,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       }
       case 'valve_solenoid': {
         objectBlocks.push(
-          [`E_Y001 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 9113608`, idProp, ...labelProp].join(
+          [`E_Y001 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 9113608`, idProp, ...elecLabelProp].join(
             '\n',
           ),
         );
@@ -2803,7 +2968,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             `lampe O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4126728`,
             idProp,
             ` S sig_color I ${rgb}`,
-            ...labelProp,
+            ...elecLabelProp,
           ].join('\n'),
         );
         addPortObj(1, 'EConnection', 'X1');
@@ -2812,7 +2977,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       }
       case 'relay_contact_changeover': {
         objectBlocks.push(
-          [`LWechsler O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3665928`, idProp, ...labelProp].join(
+          [`LWechsler O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3665928`, idProp, ...elecLabelProp].join(
             '\n',
           ),
         );
@@ -2829,7 +2994,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
             idProp,
             ' S DELAY_TIME_FEST B T',
             ` S DELAY_TIME F ${delayTenths}`,
-            ...labelProp,
+            ...elecLabelProp,
           ].join('\n'),
         );
         addPortObj(1, 'EConnection', 'A1');
@@ -3012,20 +3177,68 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     const lblH = 10240;
     const midY = cand.y1 + Math.round((cand.y2 - cand.y1 - lblH) / 2);
     const midX = cand.x1 + Math.round((cand.x2 - cand.x1 - lblW) / 2);
-    const gap = 3072;
-
-    const trials: Array<{ x1: number; y1: number }> = [
-      { x1: cand.x2 + gap, y1: midY }, // Right
-      { x1: cand.x1 - lblW - gap, y1: midY }, // Left
-      { x1: midX, y1: cand.y2 + gap }, // Below
-      { x1: midX, y1: cand.y1 - lblH - gap }, // Above
-      { x1: cand.x2 + gap, y1: cand.y1 }, // Top-right
-      { x1: cand.x1 - lblW - gap, y1: cand.y1 }, // Top-left
-      { x1: cand.x2 + gap, y1: cand.y2 - lblH }, // Bottom-right
-      { x1: cand.x1 - lblW - gap, y1: cand.y2 - lblH }, // Bottom-left
-      { x1: cand.x2 + gap * 3, y1: midY }, // Far right
-      { x1: midX, y1: cand.y2 + gap * 3 }, // Far below
-    ];
+    const gap = 5120;
+    let trials: Array<{ x1: number; y1: number }>;
+    if (cand.compType.startsWith('valve_')) {
+      trials = [
+        { x1: cand.x1, y1: cand.y1 - lblH - gap }, // Top-left above valve body
+        { x1: midX, y1: cand.y1 - lblH - gap }, // Top-center above valve body
+        { x1: cand.x1, y1: cand.y2 + gap }, // Below-left
+        { x1: midX, y1: cand.y2 + gap }, // Below-center
+      ];
+    } else if (cand.compType.startsWith('cylinder_')) {
+      trials = [
+        { x1: midX, y1: cand.y1 - 28672 - lblH - 3072 }, // Centered above R_SCHALT
+        { x1: cand.x1 - lblW - gap, y1: midY }, // Left of cylinder
+        { x1: midX, y1: cand.y2 + gap }, // Below cylinder
+      ];
+    } else if (cand.compType === 'swivel_drive' || cand.compType === 'air_motor') {
+      trials = [
+        { x1: midX, y1: cand.y1 - lblH - gap }, // Centered above swivel drive
+        { x1: cand.x2 + gap, y1: midY }, // Right
+        { x1: cand.x1 - lblW - gap, y1: midY }, // Left
+      ];
+    } else if (cand.compType === 'pressure_switch_differential') {
+      trials = [
+        { x1: midX, y1: cand.y2 + 3072 }, // Directly below PSW1 (matching real -2B1)
+        { x1: midX, y1: cand.y1 - lblH - 3072 }, // Above
+        { x1: cand.x2 + gap, y1: midY }, // Right
+      ];
+    } else if (cand.compType === 'air_service_unit') {
+      trials = [
+        { x1: midX, y1: cand.y2 + 3072 }, // Below FRL
+        { x1: cand.x1, y1: cand.y1 - lblH - 3072 }, // Above-left FRL
+      ];
+    } else if (cand.compType === 'vacuum_suction_nozzle') {
+      trials = [
+        { x1: cand.x1 - lblW - gap, y1: midY }, // Left of Venturi (away from right exhaust arrow)
+        { x1: midX, y1: cand.y2 + gap }, // Below
+        { x1: midX, y1: cand.y1 - lblH - gap }, // Above
+      ];
+    } else if (cand.compType === 'vacuum_sucker') {
+      trials = [
+        { x1: midX, y1: cand.y2 + 3072 }, // Directly below cup (away from top port 1v wire)
+        { x1: cand.x2 + gap, y1: midY }, // Right
+        { x1: cand.x1 - lblW - gap, y1: midY }, // Left
+      ];
+    } else if (cand.compType === 'air_filter') {
+      trials = [
+        { x1: cand.x1 - lblW - gap, y1: midY }, // Left of filter (clear of adjacent check valve)
+        { x1: cand.x2 + gap, y1: midY }, // Right
+        { x1: midX, y1: cand.y2 + gap }, // Below
+      ];
+    } else {
+      trials = [
+        { x1: cand.x2 + gap, y1: midY }, // Right
+        { x1: cand.x1 - lblW - gap, y1: midY }, // Left
+        { x1: midX, y1: cand.y2 + gap }, // Below
+        { x1: midX, y1: cand.y1 - lblH - gap }, // Above
+        { x1: cand.x2 + gap, y1: cand.y1 }, // Top-right
+        { x1: cand.x1 - lblW - gap, y1: cand.y1 }, // Top-left
+        { x1: cand.x2 + gap * 2, y1: midY }, // Far right
+        { x1: midX, y1: cand.y2 + gap * 2 }, // Far below
+      ];
+    }
 
     for (const t of trials) {
       const r: RawRect = { x1: t.x1, y1: t.y1, x2: t.x1 + lblW, y2: t.y1 + lblH };
@@ -3138,10 +3351,6 @@ const DXF_SYMBOL_REQUIRED_CLASSES = new Set([
   'CheckValveSpringLoadedP',
   'CheckValvePilotOperatedSpringLoadedP',
   'Wartungseinheit2',
-  'PAR1b',
-  'PAV1',
-  'PAV1S',
-  'PSW1',
 ]);
 
 /**

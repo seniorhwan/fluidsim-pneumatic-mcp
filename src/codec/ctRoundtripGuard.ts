@@ -23,14 +23,18 @@ function checkRawAstPreserved(expected: CircuitDocument, reparsed: CircuitDocume
     if (JSON.stringify(repSec.headerLinesB64) !== JSON.stringify(expSec.headerLinesB64)) return false;
     if (repSec.previewBlockB64 !== expSec.previewBlockB64) return false;
     if ((repSec.fsPreviewBlock ?? '') !== (expSec.fsPreviewBlock ?? '')) return false;
-    if (repSec.trailerText !== expSec.trailerText) return false;
 
-    // If the document was NOT semantically modified since parse, verify verbatim ctBody preservation
-    if (
-      expSec.originalSemanticFingerprint &&
-      computeSemanticFingerprint(expected) === expSec.originalSemanticFingerprint
-    ) {
+    const isUnmodified =
+      Boolean(expSec.originalSemanticFingerprint) &&
+      computeSemanticFingerprint(expected) === expSec.originalSemanticFingerprint;
+    if (isUnmodified) {
+      if (repSec.trailerText !== expSec.trailerText) return false;
       if (repSec.originalCtBody !== expSec.originalCtBody) return false;
+    } else {
+      const repTrailer = repSec.trailerText ?? '';
+      if (!repTrailer.includes('ENDCT') || !repTrailer.includes('BEGINSYM') || !repTrailer.includes('ENDSYM')) {
+        return false;
+      }
     }
     return true;
   }
