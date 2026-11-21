@@ -22,15 +22,19 @@ export class WorkspaceGuard {
     this.allowedExtensions = options.allowedExtensions ?? DEFAULT_ALLOWED_EXTENSIONS;
   }
 
-  public ensureRootExists(): void {
+  public ensureRootExists(options?: { createIfMissing?: boolean }): void {
     if (!fs.existsSync(this.root)) {
-      throw new EngineeringError({
-        category: 'AccessDenied',
-        code: 'WORKSPACE_NOT_FOUND',
-        message: `Workspace directory "${this.root}" does not exist.`,
-        offendingIds: [],
-        suggestedFix: 'Create the workspace directory or pass an existing directory via --workspace.',
-      });
+      if (options?.createIfMissing) {
+        fs.mkdirSync(this.root, { recursive: true });
+      } else {
+        throw new EngineeringError({
+          category: 'AccessDenied',
+          code: 'WORKSPACE_NOT_FOUND',
+          message: `Workspace directory "${this.root}" does not exist.`,
+          offendingIds: [],
+          suggestedFix: 'Create the workspace directory, pass --init-workspace, or pass an existing directory via --workspace.',
+        });
+      }
     }
     const stat = fs.statSync(this.root);
     if (!stat.isDirectory()) {
@@ -42,6 +46,62 @@ export class WorkspaceGuard {
         suggestedFix: 'Pass a valid directory path to --workspace.',
       });
     }
+  }
+
+  public resolveProjectDir(relativeDir: string): string {
+    return this.resolveCircuitPath(relativeDir, false);
+  }
+
+  public deleteCircuitFile(filePath: string): { absolutePath: string; relativePath: string } {
+    const resolved = this.resolveCircuitPath(filePath);
+    if (!fs.existsSync(resolved)) {
+      throw new EngineeringError({
+        category: 'InvalidTopology',
+        code: 'FILE_NOT_FOUND',
+        message: `Circuit file "${filePath}" was not found in workspace.`,
+        offendingIds: [filePath],
+        suggestedFix: 'Check available files with workspace_status before deleting.',
+      });
+    }
+    fs.unlinkSync(resolved);
+    return {
+      absolutePath: resolved,
+      relativePath: this.toRelativePath(resolved),
+    };
+  }
+
+  public renameCircuitFile(
+    fromPath: string,
+    toPath: string,
+    options?: { overwrite?: boolean },
+  ): { fromRelativePath: string; toRelativePath: string; toAbsolutePath: string } {
+    const src = this.resolveCircuitPath(fromPath);
+    const dst = this.resolveCircuitPath(toPath);
+    if (!fs.existsSync(src)) {
+      throw new EngineeringError({
+        category: 'InvalidTopology',
+        code: 'FILE_NOT_FOUND',
+        message: `Source circuit file "${fromPath}" was not found in workspace.`,
+        offendingIds: [fromPath],
+        suggestedFix: 'Check available files with workspace_status.',
+      });
+    }
+    if (fs.existsSync(dst) && !options?.overwrite && src !== dst) {
+      throw new EngineeringError({
+        category: 'AccessDenied',
+        code: 'FILE_ALREADY_EXISTS',
+        message: `Destination circuit file "${toPath}" already exists and overwrite=false.`,
+        offendingIds: [toPath],
+        suggestedFix: 'Pass overwrite=true or choose a new destination filename.',
+      });
+    }
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.renameSync(src, dst);
+    return {
+      fromRelativePath: this.toRelativePath(src),
+      toRelativePath: this.toRelativePath(dst),
+      toAbsolutePath: dst,
+    };
   }
 
   public resolveCircuitPath(relativeOrAbsPath: string, requireAllowedExtension = true): string {

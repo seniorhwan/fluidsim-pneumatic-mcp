@@ -1,9 +1,15 @@
 #!/usr/bin/env node
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseAccessMode, type AccessMode } from '../src/safety/accessMode';
 import { DEFAULT_MAX_PAYLOAD_BYTES } from '../src/contracts/pagination';
-import { SERVER_NAME, SERVER_VERSION, startStdioServer } from '../src/mcp/server';
+import {
+  SERVER_NAME,
+  SERVER_VERSION,
+  startHttpServer,
+  startStdioServer,
+} from '../src/mcp/server';
 import { WorkspaceGuard } from '../src/safety/workspaceGuard';
 import { handleFluidsimDoctor } from '../src/mcp/tools/workspaceTools';
 
@@ -16,12 +22,19 @@ export function buildHostConfigSnippet(
   repoRoot?: string,
 ): string {
   const absWorkspace = path.resolve(workspaceDir);
-  const binScript = repoRoot
-    ? path.resolve(repoRoot, 'bin', 'fluidsim-mcp.ts')
-    : path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'fluidsim-mcp.ts');
+  const resolvedRepoRoot = repoRoot
+    ? path.resolve(repoRoot)
+    : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const builtEntry = path.resolve(resolvedRepoRoot, 'dist', 'bin', 'fluidsim-mcp.js');
+  const tsxCli = path.resolve(resolvedRepoRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  const tsEntry = path.resolve(resolvedRepoRoot, 'bin', 'fluidsim-mcp.ts');
 
-  const command = 'npx';
-  const args = ['tsx', binScript, 'serve', '--workspace', absWorkspace, '--mode', mode];
+  // Prefer compiled node entrypoint (cross-platform, zero npx/Windows .cmd issues); fall back to node + tsx cli.mjs
+  const command = 'node';
+  const entryArgs = fs.existsSync(builtEntry)
+    ? [builtEntry]
+    : [tsxCli, tsEntry];
+  const args = [...entryArgs, 'serve', '--workspace', absWorkspace, '--mode', mode];
 
   if (client === 'codex') {
     const escapedArgs = args.map((a) => JSON.stringify(a)).join(', ');
@@ -82,7 +95,7 @@ function printHelp(): void {
       `${SERVER_NAME} v${SERVER_VERSION} — Headless Festo FluidSIM Pneumatics 4.5 MCP Server`,
       '',
       'Subcommands:',
-      '  serve --workspace <dir> [--mode authoring|read-only] [--max-payload-bytes 32768] [--backup]',
+      '  serve --workspace <dir> [--mode authoring|read-only] [--transport stdio|http] [--port 3000] [--host 127.0.0.1] [--init-workspace] [--max-payload-bytes 32768] [--backup]',
       '  doctor [--workspace <dir>] [--json]',
       '  print-config --client vscode|antigravity|gemini-cli|claude|codex --workspace <dir> [--mode authoring|read-only]',
       '',
@@ -99,11 +112,15 @@ async function main(): Promise<void> {
     return;
   }
 
-  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const currentFile = fileURLToPath(import.meta.url);
+  const repoRoot = currentFile.includes(`${path.sep}dist${path.sep}`)
+    ? path.resolve(path.dirname(currentFile), '..', '..')
+    : path.resolve(path.dirname(currentFile), '..');
 
   if (sub === 'serve') {
     const workspaceArg = getFlagValue(argv, '--workspace') ?? process.cwd();
     const mode = parseAccessMode(getFlagValue(argv, '--mode') ?? 'read-only');
+    const transport = getFlagValue(argv, '--transport') ?? 'stdio';
     const maxBytesRaw = getFlagValue(argv, '--max-payload-bytes');
     const maxPayloadBytes = maxBytesRaw ? Number(maxBytesRaw) : DEFAULT_MAX_PAYLOAD_BYTES;
     if (!Number.isFinite(maxPayloadBytes) || maxPayloadBytes < 512) {
@@ -112,13 +129,39 @@ async function main(): Promise<void> {
       return;
     }
 
-    await startStdioServer({
+    const commonOpts = {
       workspaceRoot: workspaceArg,
       accessMode: mode,
       maxPayloadBytes,
       createBackupOnOverwrite: hasFlag(argv, '--backup'),
+      initWorkspace: hasFlag(argv, '--init-workspace'),
       repoRoot,
-    });
+    };
+
+    if (transport === 'http') {
+      const portRaw = getFlagValue(argv, '--port');
+      const port = portRaw ? Number(portRaw) : 3000;
+      if (!Number.isInteger(port) || port < 0 || port > 65535) {
+        process.stderr.write('Error: --port must be an integer in [0, 65535].\n');
+        process.exitCode = 1;
+        return;
+      }
+      const host = getFlagValue(argv, '--host') ?? '127.0.0.1';
+      await startHttpServer({
+        ...commonOpts,
+        host,
+        port,
+      });
+      return;
+    }
+
+    if (transport !== 'stdio') {
+      process.stderr.write(`Error: --transport must be "stdio" or "http" (got "${transport}").\n`);
+      process.exitCode = 1;
+      return;
+    }
+
+    await startStdioServer(commonOpts);
     return;
   }
 
@@ -172,9 +215,10 @@ async function main(): Promise<void> {
   process.exitCode = 1;
 }
 
+const resolvedEntry = typeof process.argv[1] === 'string' ? path.resolve(process.argv[1]) : '';
 const isDirectExecution =
-  typeof process.argv[1] === 'string' &&
-  path.resolve(process.argv[1]).endsWith(path.normalize('bin/fluidsim-mcp.ts'));
+  resolvedEntry.endsWith(path.normalize('bin/fluidsim-mcp.ts')) ||
+  resolvedEntry.endsWith(path.normalize('dist/bin/fluidsim-mcp.js'));
 
 if (isDirectExecution) {
   main().catch((err) => {

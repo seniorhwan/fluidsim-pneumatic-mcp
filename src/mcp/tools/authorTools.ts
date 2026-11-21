@@ -1,5 +1,13 @@
 import fs from 'node:fs';
-import type { CircuitDocument, CircuitPatchOp } from '../../contracts/circuit';
+import path from 'node:path';
+import {
+  getSheetDimensions,
+  type CircuitDocument,
+  type CircuitPatchOp,
+  type ComponentNode,
+  type SheetDomain,
+  type SheetSizePreset,
+} from '../../contracts/circuit';
 import { EngineeringError } from '../../contracts/errors';
 import type { McpToolContext } from './context';
 import { loadCircuitFromWorkspace, saveCircuitWithPostcondition } from './context';
@@ -12,75 +20,363 @@ import {
 import { verifyCircuitSequence } from '../../simulator/sequenceVerifier';
 import { validateCircuitStatic } from '../../simulator/validator';
 
+interface ParamEntryInput {
+  key: string;
+  valueString?: string;
+  valueNumber?: number;
+  valueBoolean?: boolean;
+}
+
+function parseParamsBag(input?: {
+  params?: Record<string, unknown>;
+  paramsJson?: string;
+  paramsList?: ParamEntryInput[];
+}): Record<string, number | string | boolean> {
+  const result: Record<string, number | string | boolean> = {};
+
+  if (input?.params && typeof input.params === 'object' && !Array.isArray(input.params)) {
+    for (const [k, v] of Object.entries(input.params)) {
+      if (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') {
+        result[k] = v;
+      }
+    }
+  }
+
+  if (input?.paramsJson) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(input.paramsJson);
+    } catch (err) {
+      throw new EngineeringError({
+        category: 'InvalidTopology',
+        code: 'INVALID_PARAMS_JSON',
+        message: `paramsJson is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+        offendingIds: [],
+        suggestedFix: 'Pass a valid JSON object string, e.g. \'{"strokeMm":100,"normallyOpen":true}\'.',
+      });
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new EngineeringError({
+        category: 'InvalidTopology',
+        code: 'INVALID_PARAMS_JSON',
+        message: 'paramsJson must decode to a JSON object.',
+        offendingIds: [],
+        suggestedFix: 'Pass a JSON object string such as \'{"openingPct":40}\'.',
+      });
+    }
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') {
+        result[k] = v;
+      }
+    }
+  }
+
+  if (input?.paramsList) {
+    for (const entry of input.paramsList) {
+      if (entry.valueNumber !== undefined) result[entry.key] = entry.valueNumber;
+      else if (entry.valueBoolean !== undefined) result[entry.key] = entry.valueBoolean;
+      else if (entry.valueString !== undefined) result[entry.key] = entry.valueString;
+    }
+  }
+
+  return result;
+}
+
+export interface FlatPatchOpInput {
+  op:
+    | 'add_component'
+    | 'update_component'
+    | 'remove_component'
+    | 'connect'
+    | 'disconnect'
+    | 'set_distance_rule'
+    | 'set_label';
+  component?: {
+    id: string;
+    type: string;
+    label?: string;
+    rotationDeg?: number;
+    params?: Record<string, unknown>;
+    paramsJson?: string;
+    paramsList?: ParamEntryInput[];
+    leftActuation?: ComponentNode['leftActuation'];
+    rightActuation?: ComponentNode['rightActuation'];
+    distanceRule?: ComponentNode['distanceRule'];
+  };
+  id?: string;
+  patch?: {
+    label?: string;
+    rotationDeg?: number;
+    params?: Record<string, unknown>;
+    paramsJson?: string;
+    paramsList?: ParamEntryInput[];
+    leftActuation?: ComponentNode['leftActuation'];
+    rightActuation?: ComponentNode['rightActuation'];
+    distanceRule?: ComponentNode['distanceRule'];
+  };
+  removeConnectedEdges?: boolean;
+  from?: { componentId: string; port: string };
+  to?: { componentId: string; port: string };
+  edgeId?: string;
+  componentId?: string;
+  markers?: ComponentNode['distanceRule'];
+  label?: string;
+  side?: 'component' | 'leftActuation' | 'rightActuation';
+}
+
+function normalizePatchOperations(rawOps: readonly FlatPatchOpInput[]): CircuitPatchOp[] {
+  return rawOps.map((raw, idx): CircuitPatchOp => {
+    switch (raw.op) {
+      case 'add_component': {
+        if (!raw.component) {
+          throw new EngineeringError({
+            category: 'InvalidTopology',
+            code: 'PATCH_MISSING_FIELD',
+            message: `Patch op[${idx}] (add_component) requires a "component" object.`,
+            offendingIds: [],
+            suggestedFix: 'Include component: { id, type, label?, paramsJson? }.',
+          });
+        }
+        const rot = raw.component.rotationDeg;
+        return {
+          op: 'add_component',
+          component: {
+            id: raw.component.id,
+            type: raw.component.type,
+            label: raw.component.label,
+            ...(rot !== undefined ? { rotationDeg: rot as 0 | 90 | 180 | 270 } : {}),
+            params: parseParamsBag(raw.component),
+            leftActuation: raw.component.leftActuation,
+            rightActuation: raw.component.rightActuation,
+            distanceRule: raw.component.distanceRule,
+          },
+        };
+      }
+      case 'update_component': {
+        if (!raw.id || !raw.patch) {
+          throw new EngineeringError({
+            category: 'InvalidTopology',
+            code: 'PATCH_MISSING_FIELD',
+            message: `Patch op[${idx}] (update_component) requires "id" and "patch".`,
+            offendingIds: raw.id ? [raw.id] : [],
+            suggestedFix: 'Pass id and patch: { label?, rotationDeg?, paramsJson?, leftActuation?, rightActuation?, distanceRule? }.',
+          });
+        }
+        const mergedParams = parseParamsBag(raw.patch);
+        const hasParams =
+          raw.patch.params !== undefined ||
+          raw.patch.paramsJson !== undefined ||
+          raw.patch.paramsList !== undefined;
+        return {
+          op: 'update_component',
+          id: raw.id,
+          patch: {
+            ...(raw.patch.label !== undefined ? { label: raw.patch.label } : {}),
+            ...(raw.patch.rotationDeg !== undefined
+              ? { rotationDeg: raw.patch.rotationDeg as 0 | 90 | 180 | 270 }
+              : {}),
+            ...(hasParams ? { params: mergedParams } : {}),
+            ...(raw.patch.leftActuation !== undefined ? { leftActuation: raw.patch.leftActuation } : {}),
+            ...(raw.patch.rightActuation !== undefined ? { rightActuation: raw.patch.rightActuation } : {}),
+            ...(raw.patch.distanceRule !== undefined ? { distanceRule: raw.patch.distanceRule } : {}),
+          },
+        };
+      }
+      case 'remove_component': {
+        if (!raw.id) {
+          throw new EngineeringError({
+            category: 'InvalidTopology',
+            code: 'PATCH_MISSING_FIELD',
+            message: `Patch op[${idx}] (remove_component) requires "id".`,
+            offendingIds: [],
+            suggestedFix: 'Pass id of the component to remove.',
+          });
+        }
+        return {
+          op: 'remove_component',
+          id: raw.id,
+          removeConnectedEdges: raw.removeConnectedEdges,
+        };
+      }
+      case 'connect': {
+        if (!raw.from || !raw.to) {
+          throw new EngineeringError({
+            category: 'InvalidTopology',
+            code: 'PATCH_MISSING_FIELD',
+            message: `Patch op[${idx}] (connect) requires "from" and "to" port references.`,
+            offendingIds: [],
+            suggestedFix: 'Pass from: { componentId, port } and to: { componentId, port }.',
+          });
+        }
+        return {
+          op: 'connect',
+          id: raw.id,
+          from: raw.from,
+          to: raw.to,
+        };
+      }
+      case 'disconnect': {
+        return {
+          op: 'disconnect',
+          edgeId: raw.edgeId,
+          from: raw.from,
+          to: raw.to,
+        };
+      }
+      case 'set_distance_rule': {
+        if (!raw.componentId || !raw.markers) {
+          throw new EngineeringError({
+            category: 'InvalidTopology',
+            code: 'PATCH_MISSING_FIELD',
+            message: `Patch op[${idx}] (set_distance_rule) requires "componentId" and "markers".`,
+            offendingIds: raw.componentId ? [raw.componentId] : [],
+            suggestedFix: 'Pass componentId and markers: [{ label, positionMm }].',
+          });
+        }
+        return {
+          op: 'set_distance_rule',
+          componentId: raw.componentId,
+          markers: raw.markers,
+        };
+      }
+      case 'set_label': {
+        if (!raw.componentId || !raw.label) {
+          throw new EngineeringError({
+            category: 'InvalidTopology',
+            code: 'PATCH_MISSING_FIELD',
+            message: `Patch op[${idx}] (set_label) requires "componentId" and "label".`,
+            offendingIds: raw.componentId ? [raw.componentId] : [],
+            suggestedFix: 'Pass componentId and label.',
+          });
+        }
+        return {
+          op: 'set_label',
+          componentId: raw.componentId,
+          label: raw.label,
+          side: raw.side,
+        };
+      }
+    }
+  });
+}
+
 function buildTemplateDocument(
   template: 'blank' | 'pneumatic_basic' | 'electro_pneumatic_24v',
-  title?: string,
+  options?: {
+    title?: string;
+    sheetSize?: SheetSizePreset;
+    sheetDomain?: SheetDomain;
+    allowExternalElectricalSheet?: boolean;
+  },
 ): CircuitDocument {
   const now = new Date().toISOString();
+  const sheetSize: SheetSizePreset = options?.sheetSize ?? 'DIN_A4_LANDSCAPE';
+  const dims = getSheetDimensions(sheetSize);
+  const sheetDomain: SheetDomain =
+    options?.sheetDomain ??
+    (template === 'electro_pneumatic_24v' ? 'electro-pneumatic' : 'pneumatic-only');
+  const allowExternalElectricalSheet =
+    options?.allowExternalElectricalSheet ?? sheetDomain === 'pneumatic-only';
+
+  const baseMeta: CircuitDocument['metadata'] = {
+    title:
+      options?.title ??
+      (template === 'blank'
+        ? 'Blank FluidSIM 4.5 Circuit'
+        : template === 'pneumatic_basic'
+          ? 'Basic Pneumatic Template'
+          : 'Electro-Pneumatic 24V Template'),
+    fluidsimVersion: '4.5',
+    format: 'fsim-ir-json',
+    sheetSize,
+    sheetDomain,
+    ...(allowExternalElectricalSheet ? { allowExternalElectricalSheet: true } : {}),
+    sheetWidthMm: dims.sheetWidthMm,
+    sheetHeightMm: dims.sheetHeightMm,
+    createdAt: now,
+    updatedAt: now,
+  };
+
   if (template === 'blank') {
     return {
       schemaVersion: '1.0',
-      metadata: {
-        title: title ?? 'Blank FluidSIM 4.5 Circuit',
-        fluidsimVersion: '4.5',
-        format: 'fsim-ir-json',
-        sheetWidthMm: 297,
-        sheetHeightMm: 210,
-        createdAt: now,
-        updatedAt: now,
-      },
+      metadata: baseMeta,
       components: [],
       connections: [],
     };
   }
 
   if (template === 'pneumatic_basic') {
+    // Terminating MANIFOLD_1.4 with a blind_plug keeps MANIFOLD_1.2 & .3 free for patching
+    // while guaranteeing the fresh template passes circuit_validate with 0 errors and 0 warnings.
     return autoLayoutCircuit({
       schemaVersion: '1.0',
-      metadata: {
-        title: title ?? 'Basic Pneumatic Template',
-        fluidsimVersion: '4.5',
-        format: 'fsim-ir-json',
-        sheetWidthMm: 297,
-        sheetHeightMm: 210,
-        createdAt: now,
-        updatedAt: now,
-      },
+      metadata: baseMeta,
       components: [
         { id: 'SRC_1', type: 'air_source', label: 'P1', params: { pressureBar: 6.0, maxFlowLMin: 1000 } },
         { id: 'FRL_1', type: 'air_service_unit', label: 'FRL1', params: { nominalPressureBar: 6.0 } },
         { id: 'MANIFOLD_1', type: 'pneumatic_junction', params: {} },
+        { id: 'PLUG_1', type: 'blind_plug', params: {} },
       ],
       connections: [
         { id: 'E1', from: { componentId: 'SRC_1', port: '1' }, to: { componentId: 'FRL_1', port: '1' }, domain: 'pneumatic' },
         { id: 'E2', from: { componentId: 'FRL_1', port: '2' }, to: { componentId: 'MANIFOLD_1', port: '1' }, domain: 'pneumatic' },
+        { id: 'E3', from: { componentId: 'MANIFOLD_1', port: '4' }, to: { componentId: 'PLUG_1', port: '1' }, domain: 'pneumatic' },
       ],
     });
   }
 
   return autoLayoutCircuit({
     schemaVersion: '1.0',
-    metadata: {
-      title: title ?? 'Electro-Pneumatic 24V Template',
-      fluidsimVersion: '4.5',
-      format: 'fsim-ir-json',
-      sheetWidthMm: 297,
-      sheetHeightMm: 210,
-      createdAt: now,
-      updatedAt: now,
-    },
+    metadata: baseMeta,
     components: [
       { id: 'SRC_1', type: 'air_source', label: 'P1', params: { pressureBar: 6.0, maxFlowLMin: 1000 } },
       { id: 'FRL_1', type: 'air_service_unit', label: 'FRL1', params: { nominalPressureBar: 6.0 } },
       { id: 'MANIFOLD_1', type: 'pneumatic_junction', params: {} },
+      { id: 'PLUG_1', type: 'blind_plug', params: {} },
       { id: 'PWR_24V', type: 'power_24v', label: '+24V', params: { voltageV: 24 } },
       { id: 'PWR_0V', type: 'power_0v', label: '0V', params: {} },
     ],
     connections: [
       { id: 'E1', from: { componentId: 'SRC_1', port: '1' }, to: { componentId: 'FRL_1', port: '1' }, domain: 'pneumatic' },
       { id: 'E2', from: { componentId: 'FRL_1', port: '2' }, to: { componentId: 'MANIFOLD_1', port: '1' }, domain: 'pneumatic' },
+      { id: 'E3', from: { componentId: 'MANIFOLD_1', port: '4' }, to: { componentId: 'PLUG_1', port: '1' }, domain: 'pneumatic' },
     ],
   });
+}
+
+export function handleProjectCreate(
+  ctx: McpToolContext,
+  args: {
+    name: string;
+    starterCircuit?: string;
+    template?: 'blank' | 'pneumatic_basic' | 'electro_pneumatic_24v';
+    sheetSize?: SheetSizePreset;
+    sheetDomain?: SheetDomain;
+  },
+) {
+  ctx.guard.ensureRootExists({ createIfMissing: true });
+  const projectDirAbs = ctx.guard.resolveProjectDir(args.name);
+  fs.mkdirSync(projectDirAbs, { recursive: true });
+  const projectRel = ctx.guard.toRelativePath(projectDirAbs);
+
+  let createdCircuit: ReturnType<typeof handleCircuitCreate> | undefined;
+  if (args.starterCircuit) {
+    const circuitRel = path.posix.join(projectRel, args.starterCircuit);
+    createdCircuit = handleCircuitCreate(ctx, {
+      path: circuitRel,
+      template: args.template ?? 'pneumatic_basic',
+      sheetSize: args.sheetSize ?? 'DIN_A4_LANDSCAPE',
+      sheetDomain: args.sheetDomain,
+      overwrite: false,
+    });
+  }
+
+  return {
+    projectDir: projectRel,
+    created: true,
+    ...(createdCircuit ? { starterCircuit: createdCircuit } : {}),
+  };
 }
 
 export function handleCircuitCreate(
@@ -89,9 +385,13 @@ export function handleCircuitCreate(
     path: string;
     template?: 'blank' | 'pneumatic_basic' | 'electro_pneumatic_24v';
     title?: string;
+    sheetSize?: SheetSizePreset;
+    sheetDomain?: SheetDomain;
+    allowExternalElectricalSheet?: boolean;
     overwrite?: boolean;
   },
 ) {
+  ctx.guard.ensureRootExists({ createIfMissing: true });
   const abs = ctx.guard.resolveCircuitPath(args.path);
   if (fs.existsSync(abs) && !args.overwrite) {
     throw new EngineeringError({
@@ -103,12 +403,19 @@ export function handleCircuitCreate(
     });
   }
 
-  const doc = buildTemplateDocument(args.template ?? 'blank', args.title);
+  const doc = buildTemplateDocument(args.template ?? 'blank', {
+    title: args.title,
+    sheetSize: args.sheetSize,
+    sheetDomain: args.sheetDomain,
+    allowExternalElectricalSheet: args.allowExternalElectricalSheet,
+  });
   const saved = saveCircuitWithPostcondition(ctx, args.path, doc);
 
   return {
     path: saved.relativePath,
     template: args.template ?? 'blank',
+    sheetWidthMm: doc.metadata.sheetWidthMm,
+    sheetHeightMm: doc.metadata.sheetHeightMm,
     componentCount: doc.components.length,
     connectionCount: doc.connections.length,
     postconditionPassed: saved.postcondition.passed,
@@ -120,12 +427,62 @@ export function handleCircuitCreate(
   };
 }
 
+export function handleCircuitClone(
+  ctx: McpToolContext,
+  args: { fromPath: string; toPath: string; overwrite?: boolean },
+) {
+  const { document, relativePath: fromRel } = loadCircuitFromWorkspace(ctx, args.fromPath);
+  const dstAbs = ctx.guard.resolveCircuitPath(args.toPath);
+  if (fs.existsSync(dstAbs) && !args.overwrite) {
+    throw new EngineeringError({
+      category: 'AccessDenied',
+      code: 'FILE_ALREADY_EXISTS',
+      message: `Destination circuit file "${args.toPath}" already exists and overwrite=false.`,
+      offendingIds: [args.toPath],
+      suggestedFix: 'Pass overwrite=true or choose a new destination filename.',
+    });
+  }
+  const cloned: CircuitDocument = structuredClone(document);
+  cloned.metadata.updatedAt = new Date().toISOString();
+  const saved = saveCircuitWithPostcondition(ctx, args.toPath, cloned);
+  return {
+    fromPath: fromRel,
+    toPath: saved.relativePath,
+    componentCount: cloned.components.length,
+    connectionCount: cloned.connections.length,
+    postconditionPassed: saved.postcondition.passed,
+  };
+}
+
+export function handleCircuitRename(
+  ctx: McpToolContext,
+  args: { fromPath: string; toPath: string; overwrite?: boolean },
+) {
+  const res = ctx.guard.renameCircuitFile(args.fromPath, args.toPath, {
+    overwrite: args.overwrite,
+  });
+  return {
+    fromPath: res.fromRelativePath,
+    toPath: res.toRelativePath,
+    renamed: true,
+  };
+}
+
+export function handleCircuitDelete(ctx: McpToolContext, args: { path: string }) {
+  const res = ctx.guard.deleteCircuitFile(args.path);
+  return {
+    path: res.relativePath,
+    deleted: true,
+  };
+}
+
 export function handleCircuitApplyPatch(
   ctx: McpToolContext,
-  args: { path: string; operations: CircuitPatchOp[]; backup?: boolean; dryRun?: boolean },
+  args: { path: string; operations: FlatPatchOpInput[]; backup?: boolean; dryRun?: boolean },
 ) {
   const { document, relativePath } = loadCircuitFromWorkspace(ctx, args.path);
-  const patched = applyCircuitPatch(document, args.operations);
+  const normalizedOps = normalizePatchOperations(args.operations);
+  const patched = applyCircuitPatch(document, normalizedOps);
 
   if (args.dryRun) {
     const validation = validateCircuitStatic(patched.document);
@@ -165,8 +522,10 @@ export function handleCircuitGenerateFromSpec(
   ctx: McpToolContext,
   args: CircuitSpecRequest & { path: string; verifySequence?: boolean },
 ) {
+  ctx.guard.ensureRootExists({ createIfMissing: true });
   const doc = generateCircuitFromSpec({
     title: args.title,
+    sheetSize: args.sheetSize,
     actuators: args.actuators,
     sequence: args.sequence,
     controlMethod: args.controlMethod,
@@ -202,6 +561,8 @@ export function handleCircuitGenerateFromSpec(
   return {
     path: saved.relativePath,
     controlMethod: args.controlMethod,
+    sheetWidthMm: doc.metadata.sheetWidthMm,
+    sheetHeightMm: doc.metadata.sheetHeightMm,
     componentCount: doc.components.length,
     connectionCount: doc.connections.length,
     postconditionPassed: saved.postcondition.passed,

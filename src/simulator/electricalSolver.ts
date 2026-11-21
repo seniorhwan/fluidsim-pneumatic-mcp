@@ -178,15 +178,15 @@ export function stepElectricalSolver(input: ElectricalTickInput): ElectricalTick
         const closed = c.params.normalState === 'NC' ? !triggered : triggered;
         if (closed) addEdge(adj, pKey(c.id, '13'), pKey(c.id, '14'));
       } else if (c.type === 'relay_contact_no') {
-        if (c.label && state.coilOutputsByLabel[c.label]) {
+        if (c.label && (state.coilOutputsByLabel[c.label] || activeSensorLabels.has(c.label))) {
           addEdge(adj, pKey(c.id, '13'), pKey(c.id, '14'));
         }
       } else if (c.type === 'relay_contact_nc') {
-        if (!c.label || !state.coilOutputsByLabel[c.label]) {
+        if (!c.label || (!state.coilOutputsByLabel[c.label] && !activeSensorLabels.has(c.label))) {
           addEdge(adj, pKey(c.id, '11'), pKey(c.id, '12'));
         }
       } else if (c.type === 'relay_contact_changeover') {
-        const active = Boolean(c.label && state.coilOutputsByLabel[c.label]);
+        const active = Boolean(c.label && (state.coilOutputsByLabel[c.label] || activeSensorLabels.has(c.label)));
         if (active) addEdge(adj, pKey(c.id, '11'), pKey(c.id, '14'));
         else addEdge(adj, pKey(c.id, '11'), pKey(c.id, '12'));
       }

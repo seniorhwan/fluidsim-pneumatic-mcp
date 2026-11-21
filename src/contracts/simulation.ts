@@ -7,7 +7,7 @@ import type { FailureCategory } from './errors';
 export type InputAction = 'press' | 'release' | 'toggle' | 'hold';
 
 export interface SimInputEvent {
-  /** Component label (e.g., "S1", "ESTOP") or component ID. */
+  /** Component label (e.g., "S1", "ESTOP", "-1M1") or component ID. */
   label: string;
   action: InputAction;
   /** Timestamp in milliseconds when input action begins. */
@@ -42,6 +42,8 @@ export interface SimEventRecord {
     | 'relay_deenergized'
     | 'solenoid_energized'
     | 'solenoid_deenergized'
+    | 'vacuum_gripped'
+    | 'vacuum_released'
     | 'diagnostic';
   componentId: string;
   label?: string;
@@ -77,6 +79,7 @@ export interface SimFinalState {
       strokeMm: number;
       pct: number;
       activeMarkers: string[];
+      unit?: 'mm' | 'deg';
     }
   >;
   valves: Record<
@@ -91,6 +94,9 @@ export interface SimFinalState {
   relays: Record<string, { label: string; energized: boolean }>;
   solenoids: Record<string, { label: string; energized: boolean }>;
   lamps: Record<string, { label: string; lit: boolean }>;
+  vacuum?: Record<string, { label: string; pressureBar: number; gripped?: boolean }>;
+  pressureSwitches?: Record<string, { label: string; active: boolean; diffBar: number; thresholdBar: number }>;
+  gauges?: Record<string, { label: string; pressureBar: number }>;
 }
 
 export interface SimResult {
@@ -150,4 +156,9 @@ export interface StaticValidationReport {
   errorCount: number;
   warningCount: number;
   findings: StaticValidationFinding[];
+}
+
+export interface StaticValidationOptions {
+  /** When true, solenoid-labeled valves validate without requiring electrical valve_solenoid coils on the same sheet. */
+  allowExternalElectricalSheet?: boolean;
 }

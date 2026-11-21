@@ -10,6 +10,16 @@ export const FLUIDSIM_CT_MAGIC_PREFIX = Buffer.from(
   'hex',
 );
 
+/**
+ * All three empirically verified Festo FluidSIM 4.x/4.5 `.ct` container magic prefixes
+ * observed across 263 official Didactic circuits (all share `FLUIDSIM_CT_MARKER_LINE`).
+ */
+export const FLUIDSIM_CT_MAGIC_PREFIXES: readonly Buffer[] = [
+  Buffer.from('3e6c75423f56daaf205628b0c36c08bb', 'hex'),
+  Buffer.from('6e33c0a621ce30e820ce6fa953336de9', 'hex'),
+  Buffer.from('7f8943f87a219c112021f2680b898bcf', 'hex'),
+];
+
 export const FLUIDSIM_CT_MARKER_LINE = Buffer.from('50c2e8b3557fcece', 'hex');
 
 export const FLUIDSIM_CT_XOR_KEY = 0x9a;
@@ -73,8 +83,13 @@ function buildDefaultPreviewBlock(): Buffer {
 }
 
 export function isFluidSimCtBuffer(buffer: Buffer): boolean {
-  if (buffer.length < FLUIDSIM_CT_MAGIC_PREFIX.length + 16) return false;
-  return buffer.subarray(0, FLUIDSIM_CT_MAGIC_PREFIX.length).equals(FLUIDSIM_CT_MAGIC_PREFIX);
+  if (buffer.length < 32) return false;
+  const prefix = buffer.subarray(0, 16);
+  const magicMatched = FLUIDSIM_CT_MAGIC_PREFIXES.some((m) => prefix.equals(m));
+  if (!magicMatched) return false;
+  // Confirm the 8-byte FluidSIM payload boundary marker line appears in the container header
+  const scanWindow = buffer.subarray(16, Math.min(buffer.length, 4096));
+  return scanWindow.indexOf(FLUIDSIM_CT_MARKER_LINE) >= 0;
 }
 
 export function splitCtLines(buffer: Buffer): Buffer[] {

@@ -6,9 +6,14 @@ import { simulateCircuit } from '../../simulator/simulator';
 import { verifyCircuitSequence } from '../../simulator/sequenceVerifier';
 import { paginateWithBudget } from '../../contracts/pagination';
 
-export function handleCircuitValidate(ctx: McpToolContext, args: { path: string }) {
+export function handleCircuitValidate(
+  ctx: McpToolContext,
+  args: { path: string; allowExternalElectricalSheet?: boolean },
+) {
   const { document, relativePath } = loadCircuitFromWorkspace(ctx, args.path);
-  const report = validateCircuitStatic(document);
+  const report = validateCircuitStatic(document, {
+    allowExternalElectricalSheet: args.allowExternalElectricalSheet,
+  });
   return {
     path: relativePath,
     ...report,

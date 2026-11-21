@@ -5,24 +5,49 @@
 
 import type { ValveActuationType } from './catalog';
 
+export type SheetSizePreset = 'DIN_A4_LANDSCAPE' | 'DIN_A3_LANDSCAPE' | 'DIN_A4_PORTRAIT';
+
+export type SheetDomain = 'electro-pneumatic' | 'pneumatic-only' | 'electrical-only';
+
+export function getSheetDimensions(preset: SheetSizePreset = 'DIN_A4_LANDSCAPE'): {
+  sheetWidthMm: number;
+  sheetHeightMm: number;
+} {
+  switch (preset) {
+    case 'DIN_A3_LANDSCAPE':
+      return { sheetWidthMm: 420, sheetHeightMm: 297 };
+    case 'DIN_A4_PORTRAIT':
+      return { sheetWidthMm: 210, sheetHeightMm: 297 };
+    case 'DIN_A4_LANDSCAPE':
+    default:
+      return { sheetWidthMm: 297, sheetHeightMm: 210 };
+  }
+}
+
 export interface Point2D {
   x: number;
   y: number;
 }
 
 export interface DistanceRuleMarker {
-  /** Sensor label (e.g., "a0", "a1", "b0", "b1"). */
+  /** Sensor label (e.g., "a0", "a1", "b0", "b1", "-3S1", "-3S2"). */
   label: string;
-  /** Position along stroke in mm (0 .. strokeMm). */
+  /** Position along linear stroke (mm) or rotary swivel angle (deg). */
   positionMm: number;
-  /** Optional detection window width in mm (default 2mm). */
+  /** Optional detection window width in mm/deg (default 2). */
   toleranceMm?: number;
 }
 
 export interface ValveActuationSide {
   type: ValveActuationType;
-  /** Label binding for solenoid (e.g., "Y1"), roller/limit switch (e.g., "a0"), or pushbutton (e.g., "S1"). */
+  /** Label binding for solenoid (e.g., "Y1", "-1M1"), roller/limit switch (e.g., "a0"), or pushbutton (e.g., "S1"). */
   label?: string;
+  /** Composite manual override operator (e.g. solenoid + manual override). */
+  manualOverride?: boolean;
+  /** Composite internal pneumatic pilot assist (e.g. solenoid + internal pilot). */
+  internalPilot?: boolean;
+  /** Composite mechanical spring combined with pneumatic_spring return. */
+  springReturn?: boolean;
 }
 
 export interface ComponentLayout {
@@ -44,8 +69,10 @@ export interface ComponentNode {
   /** Valve actuation configuration (for directional_valve components). */
   leftActuation?: ValveActuationSide;
   rightActuation?: ValveActuationSide;
-  /** Cylinder distance-rule sensor markers (for actuators). */
+  /** Actuator distance-rule sensor markers (linear mm or swivel deg). */
   distanceRule?: DistanceRuleMarker[];
+  /** Semantic component orientation (0 | 90 | 180 | 270 deg), synced with layout.rotationDeg without needing manual x/y coords. */
+  rotationDeg?: 0 | 90 | 180 | 270;
   /** Computed or preserved 2D placement (auto-populated by layoutRouter). */
   layout?: ComponentLayout;
   /** Lossless preservation bucket for raw FluidSIM 4.5 .ct attributes. */
@@ -74,6 +101,10 @@ export interface CircuitMetadata {
   format: 'fsim-ir-json' | 'fluidsim-4.5-ct';
   sheetWidthMm: number;
   sheetHeightMm: number;
+  sheetSize?: SheetSizePreset;
+  sheetDomain?: SheetDomain;
+  /** When true, solenoid-labeled valves validate without requiring electrical valve_solenoid coils on the same sheet. */
+  allowExternalElectricalSheet?: boolean;
   createdAt?: string;
   updatedAt?: string;
   notes?: string;

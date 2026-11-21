@@ -2,7 +2,9 @@ import type { CircuitDocument, ComponentNode, Point2D } from '../contracts/circu
 import { getCatalogComponent, getPortDefinition } from '../catalog/pneumatics45';
 
 const GRID_MM = 5;
-const MIN_CLEARANCE_MM = 6;
+const MIN_CLEARANCE_MM = 5;
+const MARGIN_X_MM = 15;
+const MARGIN_Y_MM = 15;
 
 function snap(v: number): number {
   return Math.round(v / GRID_MM) * GRID_MM;
@@ -10,6 +12,41 @@ function snap(v: number): number {
 
 function naturalCompare(a: string, b: string): number {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+export function getEffectiveRotationDeg(comp: ComponentNode): 0 | 90 | 180 | 270 {
+  const raw = comp.rotationDeg ?? comp.layout?.rotationDeg ?? 0;
+  if (raw === 90 || raw === 180 || raw === 270) return raw;
+  return 0;
+}
+
+function getRotatedDimensions(comp: ComponentNode): { w: number; h: number } {
+  const def = getCatalogComponent(comp.type);
+  const baseW = def?.defaultSize.width ?? 20;
+  const baseH = def?.defaultSize.height ?? 16;
+  const rot = getEffectiveRotationDeg(comp);
+  if (rot === 90 || rot === 270) {
+    return { w: baseH, h: baseW };
+  }
+  return { w: baseW, h: baseH };
+}
+
+function rotatePortOffset(
+  offset: { x: number; y: number },
+  baseW: number,
+  baseH: number,
+  rot: 0 | 90 | 180 | 270,
+): { x: number; y: number } {
+  if (rot === 90) {
+    return { x: baseH - offset.y, y: offset.x };
+  }
+  if (rot === 180) {
+    return { x: baseW - offset.x, y: baseH - offset.y };
+  }
+  if (rot === 270) {
+    return { x: offset.y, y: baseW - offset.x };
+  }
+  return offset;
 }
 
 interface LayoutBox {
@@ -22,18 +59,28 @@ interface LayoutBox {
 
 /**
  * Automatic ISO 1219 pneumatic top-down layout & 24V/0V ladder organizer + orthogonal router.
- * Features topology-aware actuator column alignment, guaranteed zero-overlap fixed-point resolution
- * (in both full and incremental modes), and corridor-aware orthogonal Manhattan routing.
+ * Features:
+ * - Sheet-size-aware packing (respects DIN A4 297×210, DIN A3 420×297, etc.) with row wrapping
+ * - Full preservation of component rotationDeg (0/90/180/270) including rotated bounding boxes & ports
+ * - Topology-aware actuator column alignment & guaranteed zero-overlap fixed-point resolution
+ * - Corridor-aware orthogonal Manhattan routing
  */
 export function autoLayoutCircuit(
   doc: CircuitDocument,
   options?: { incremental?: boolean },
 ): CircuitDocument {
   const incremental = options?.incremental ?? false;
-  const components: ComponentNode[] = doc.components.map((c) => ({
-    ...c,
-    layout: c.layout ? { ...c.layout } : undefined,
-  }));
+  const targetSheetWidthMm = Math.max(doc.metadata.sheetWidthMm || 297, 210);
+  const targetSheetHeightMm = Math.max(doc.metadata.sheetHeightMm || 210, 148);
+
+  const components: ComponentNode[] = doc.components.map((c) => {
+    const rot = getEffectiveRotationDeg(c);
+    return {
+      ...c,
+      rotationDeg: rot !== 0 ? rot : c.rotationDeg,
+      layout: c.layout ? { ...c.layout, rotationDeg: rot } : undefined,
+    };
+  });
 
   // Build quick neighbor map to align throttles & valves directly below their target cylinders
   const neighborIds = new Map<string, Set<string>>();
@@ -48,11 +95,13 @@ export function autoLayoutCircuit(
 
   const pneuLayers = new Map<number, ComponentNode[]>();
   const elecLayers = new Map<number, ComponentNode[]>();
+  let hasElectricalComponents = false;
 
   for (const comp of components) {
-    if (incremental && comp.layout) continue;
     const def = getCatalogComponent(comp.type);
     const layer = def?.layoutLayer ?? 3;
+    if (layer >= 10) hasElectricalComponents = true;
+    if (incremental && comp.layout) continue;
     if (layer >= 10) {
       const list = elecLayers.get(layer) ?? [];
       list.push(comp);
@@ -65,35 +114,53 @@ export function autoLayoutCircuit(
   }
 
   // Pneumatic ISO 1219 vertical bands (layer 0 = Actuators top -> layer 4 = Air Supply bottom)
-  const pneuLayerY: Record<number, number> = {
-    0: 20, // Actuators
-    1: 60, // Flow control / quick exhaust
-    2: 100, // Final control valves (5/2, 4/2, 5/3)
-    3: 145, // Processing / logic / pilot 3/2 valves / exhausts
-    4: 190, // Air source & FRL
-  };
+  const isTallSheet = targetSheetHeightMm >= 260;
+  const pneuLayerY: Record<number, number> = isTallSheet
+    ? {
+        0: 15, // Actuators
+        1: 55, // Flow control / quick exhaust / filters / sensors
+        2: 105, // Final control valves (5/2, 4/2, 5/3, 2/2)
+        3: 155, // Processing / logic / pilot 3/2 valves / manifolds / exhausts / plugs
+        4: 225, // Air source & FRL
+      }
+    : {
+        0: 15, // Actuators
+        1: 50, // Flow control / quick exhaust
+        2: 90, // Final control valves
+        3: 135, // Processing / logic / pilot 3/2 valves / exhausts
+        4: 180, // Air source & FRL
+      };
+
+  // Determine available pneumatic horizontal budget within sheet bounds
+  const pneuMaxRightMm = hasElectricalComponents
+    ? Math.max(targetSheetWidthMm * 0.55, 220)
+    : targetSheetWidthMm - MARGIN_X_MM;
 
   const placedCenterX = new Map<string, number>();
-  // Pre-seed centers of already placed components in incremental mode
   for (const comp of components) {
     if (comp.layout) {
-      const w = getCatalogComponent(comp.type)?.defaultSize.width ?? 24;
+      const { w } = getRotatedDimensions(comp);
       placedCenterX.set(comp.id, comp.layout.x + w / 2);
     }
   }
 
-  let maxPneuX = 20;
+  let maxPneuX = MARGIN_X_MM;
   for (const comp of components) {
     if (comp.layout) {
       const def = getCatalogComponent(comp.type);
       if ((def?.layoutLayer ?? 3) < 10) {
-        maxPneuX = Math.max(maxPneuX, comp.layout.x + (def?.defaultSize.width ?? 24));
+        const { w } = getRotatedDimensions(comp);
+        maxPneuX = Math.max(maxPneuX, comp.layout.x + w);
       }
     }
   }
 
   // Place pneumatic layers top-down so lower layers align horizontally under their upstream actuators
-  for (const [layer, comps] of Array.from(pneuLayers.entries()).sort((a, b) => a[0] - b[0])) {
+  // Wrap cleanly within pneuMaxRightMm so dense sheets (e.g. 37-component DIN A3) stay inside sheet bounds.
+  const sortedPneuLayers = Array.from(pneuLayers.entries()).sort((a, b) => a[0] - b[0]);
+  let minAllowedY = MARGIN_Y_MM;
+
+  for (const [layer, comps] of sortedPneuLayers) {
     const preferredX = (comp: ComponentNode): number => {
       const nbrs = neighborIds.get(comp.id);
       if (!nbrs || nbrs.size === 0) return Number.POSITIVE_INFINITY;
@@ -116,27 +183,60 @@ export function autoLayoutCircuit(
       return naturalCompare(a.id, b.id);
     });
 
-    let cursorX = 20;
-    const baseY = pneuLayerY[layer] ?? 145;
+    // Compute adaptive horizontal gap so dense layers pack neatly before wrapping
+    const totalWidths = comps.reduce((sum, c) => sum + getRotatedDimensions(c).w, 0);
+    const usableSpan = Math.max(120, pneuMaxRightMm - MARGIN_X_MM);
+    const idealGap =
+      comps.length > 1
+        ? Math.floor((usableSpan - totalWidths) / (comps.length - 1))
+        : 15;
+    const gapX = Math.max(MIN_CLEARANCE_MM + 3, Math.min(16, idealGap));
+    const denseLayer = totalWidths + (comps.length - 1) * (MIN_CLEARANCE_MM + 3) > usableSpan;
+
+    let cursorX = MARGIN_X_MM;
+    let rowY = snap(Math.max(pneuLayerY[layer] ?? 140, minAllowedY));
+    let rowMaxH = 0;
 
     for (const comp of comps) {
-      const def = getCatalogComponent(comp.type);
-      const w = def?.defaultSize.width ?? 24;
+      const { w, h } = getRotatedDimensions(comp);
+      const rot = getEffectiveRotationDeg(comp);
       const pref = preferredX(comp);
-      const targetX = Number.isFinite(pref) ? Math.max(cursorX, snap(pref - w / 2)) : cursorX;
+
+      let targetX: number;
+      if (!denseLayer && Number.isFinite(pref)) {
+        targetX = Math.max(cursorX, snap(pref - w / 2));
+        // Pull left if pulling right would overflow the sheet unnecessarily
+        if (targetX + w > pneuMaxRightMm && cursorX + w <= pneuMaxRightMm) {
+          targetX = cursorX;
+        }
+      } else {
+        targetX = cursorX;
+      }
+
+      // Wrap to next sub-row if exceeding target pneumatic zone width
+      if (targetX + w > pneuMaxRightMm && cursorX > MARGIN_X_MM) {
+        cursorX = MARGIN_X_MM;
+        rowY = snap(rowY + Math.max(rowMaxH, 16) + MIN_CLEARANCE_MM + GRID_MM);
+        rowMaxH = 0;
+        targetX = cursorX;
+      }
+
       comp.layout = {
         x: snap(targetX),
-        y: snap(baseY),
-        rotationDeg: 0,
+        y: snap(rowY),
+        rotationDeg: rot,
       };
       placedCenterX.set(comp.id, comp.layout.x + w / 2);
-      cursorX = comp.layout.x + w + 18;
-      if (cursorX > maxPneuX) maxPneuX = cursorX;
+      cursorX = snap(comp.layout.x + w + gapX);
+      rowMaxH = Math.max(rowMaxH, h);
+      if (comp.layout.x + w > maxPneuX) maxPneuX = comp.layout.x + w;
     }
+
+    minAllowedY = snap(rowY + Math.max(rowMaxH, 16) + MIN_CLEARANCE_MM + GRID_MM);
   }
 
   // Electrical 24V / 0V ladder section placed cleanly to the right of pneumatic zone
-  const elecOriginX = snap(Math.max(180, maxPneuX + 30));
+  const elecOriginX = snap(Math.max(180, maxPneuX + 25));
   const elecLayerY: Record<number, number> = {
     10: 20, // +24V rail
     11: 55, // Pushbuttons / limit switches / proximity sensors
@@ -145,10 +245,8 @@ export function autoLayoutCircuit(
     14: 185, // 0V rail
   };
 
-  let maxElecX = elecOriginX;
   for (const [layer, comps] of Array.from(elecLayers.entries()).sort((a, b) => a[0] - b[0])) {
     comps.sort((a, b) => {
-      // Keep E-stop and Start buttons on the left of electrical ladder
       const rank = (c: ComponentNode): number => {
         if (c.label === 'ESTOP' || c.id.includes('ESTOP')) return 0;
         if (c.label === 'S1' || c.id.includes('START')) return 1;
@@ -164,44 +262,42 @@ export function autoLayoutCircuit(
     const baseY = elecLayerY[layer] ?? 95;
 
     for (const comp of comps) {
-      const def = getCatalogComponent(comp.type);
-      const w = def?.defaultSize.width ?? 14;
+      const { w } = getRotatedDimensions(comp);
+      const rot = getEffectiveRotationDeg(comp);
       comp.layout = {
         x: snap(cursorX),
         y: snap(baseY),
-        rotationDeg: 0,
+        rotationDeg: rot,
       };
-      cursorX = comp.layout.x + w + 16;
-      if (cursorX > maxElecX) maxElecX = cursorX;
+      cursorX = snap(comp.layout.x + w + 15);
     }
   }
 
   // Always enforce zero-overlap bounding boxes (fixed-point resolution for both full & incremental)
-  resolveBoundingBoxOverlaps(components);
+  const wrapLimitX = hasElectricalComponents ? undefined : pneuMaxRightMm;
+  resolveBoundingBoxOverlaps(components, wrapLimitX);
 
   // Recompute sheet bounds after overlap resolution
-  let maxRightMm = 297;
-  let maxBottomMm = 210;
+  let maxRightMm = targetSheetWidthMm;
+  let maxBottomMm = targetSheetHeightMm;
   for (const comp of components) {
     if (!comp.layout) continue;
-    const def = getCatalogComponent(comp.type);
-    const w = def?.defaultSize.width ?? 24;
-    const h = def?.defaultSize.height ?? 16;
-    maxRightMm = Math.max(maxRightMm, comp.layout.x + w + 30);
-    maxBottomMm = Math.max(maxBottomMm, comp.layout.y + h + 30);
+    const { w, h } = getRotatedDimensions(comp);
+    maxRightMm = Math.max(maxRightMm, comp.layout.x + w + MARGIN_X_MM);
+    maxBottomMm = Math.max(maxBottomMm, comp.layout.y + h + MARGIN_Y_MM);
   }
 
   // Build bounding boxes for obstacle-aware corridor routing
   const allBoxes: LayoutBox[] = components
     .filter((c): c is ComponentNode & { layout: NonNullable<ComponentNode['layout']> } => Boolean(c.layout))
     .map((comp) => {
-      const def = getCatalogComponent(comp.type);
+      const { w, h } = getRotatedDimensions(comp);
       return {
         comp,
         x: comp.layout.x,
         y: comp.layout.y,
-        w: def?.defaultSize.width ?? 20,
-        h: def?.defaultSize.height ?? 16,
+        w,
+        h,
       };
     });
 
@@ -214,15 +310,30 @@ export function autoLayoutCircuit(
       return { ...edge };
     }
 
+    const fromDef = getCatalogComponent(fromComp.type);
+    const toDef = getCatalogComponent(toComp.type);
     const fromPort = getPortDefinition(fromComp.type, edge.from.port);
     const toPort = getPortDefinition(toComp.type, edge.to.port);
+    const fromRotOffset = rotatePortOffset(
+      fromPort?.offset ?? { x: 0, y: 0 },
+      fromDef?.defaultSize.width ?? 20,
+      fromDef?.defaultSize.height ?? 16,
+      getEffectiveRotationDeg(fromComp),
+    );
+    const toRotOffset = rotatePortOffset(
+      toPort?.offset ?? { x: 0, y: 0 },
+      toDef?.defaultSize.width ?? 20,
+      toDef?.defaultSize.height ?? 16,
+      getEffectiveRotationDeg(toComp),
+    );
+
     const p1: Point2D = {
-      x: snap(fromComp.layout.x + (fromPort?.offset.x ?? 0)),
-      y: snap(fromComp.layout.y + (fromPort?.offset.y ?? 0)),
+      x: snap(fromComp.layout.x + fromRotOffset.x),
+      y: snap(fromComp.layout.y + fromRotOffset.y),
     };
     const p2: Point2D = {
-      x: snap(toComp.layout.x + (toPort?.offset.x ?? 0)),
-      y: snap(toComp.layout.y + (toPort?.offset.y ?? 0)),
+      x: snap(toComp.layout.x + toRotOffset.x),
+      y: snap(toComp.layout.y + toRotOffset.y),
     };
 
     const waypoints = routeOrthogonalManhattan(p1, p2, idx, allBoxes, fromComp.id, toComp.id);
@@ -232,8 +343,8 @@ export function autoLayoutCircuit(
     };
   });
 
-  const sheetWidthMm = Math.max(doc.metadata.sheetWidthMm, snap(maxRightMm), 297);
-  const sheetHeightMm = Math.max(doc.metadata.sheetHeightMm, snap(maxBottomMm), 210);
+  const sheetWidthMm = Math.max(targetSheetWidthMm, snap(maxRightMm));
+  const sheetHeightMm = Math.max(targetSheetHeightMm, snap(maxBottomMm));
 
   return {
     ...doc,
@@ -278,7 +389,6 @@ function routeOrthogonalManhattan(
     return [p1, p2];
   }
   const baseMidY = snap((p1.y + p2.y) / 2);
-  // Try clean corridor lanes near the midpoint to avoid crossing through component boxes
   const laneOffsets = [0, 1, -1, 2, -2, 3, -3, 4, -4];
   const preferredStart = channelIndex % 3;
   let chosenY = snap(baseMidY + ((channelIndex % 5) - 2) * GRID_MM);
@@ -303,18 +413,20 @@ function routeOrthogonalManhattan(
 /**
  * Iterative fixed-point overlap resolver guaranteeing zero overlapping bounding boxes
  * across all components with at least MIN_CLEARANCE_MM spacing.
+ * When maxRightMm is provided (e.g. pneumatic-only DIN A3 sheet), wraps overflowing items
+ * cleanly onto the next row instead of expanding sheet width unboundedly.
  */
-function resolveBoundingBoxOverlaps(components: ComponentNode[]): void {
+function resolveBoundingBoxOverlaps(components: ComponentNode[], maxRightMm?: number): void {
   const boxes = components.map((c) => {
-    const def = getCatalogComponent(c.type);
+    const { w, h } = getRotatedDimensions(c);
     return {
       comp: c,
-      w: def?.defaultSize.width ?? 20,
-      h: def?.defaultSize.height ?? 16,
+      w,
+      h,
     };
   });
 
-  for (let pass = 0; pass < 32; pass++) {
+  for (let pass = 0; pass < 48; pass++) {
     let moved = false;
     for (let i = 0; i < boxes.length; i++) {
       const a = boxes[i];
@@ -330,12 +442,24 @@ function resolveBoundingBoxOverlaps(components: ComponentNode[]): void {
           a.comp.layout.y < b.comp.layout.y + b.h + MIN_CLEARANCE_MM &&
           a.comp.layout.y + a.h + MIN_CLEARANCE_MM > b.comp.layout.y;
         if (overlapX && overlapY) {
-          // Push the later/rightmost box cleanly to the right of the other
-          const target = a.comp.layout.x >= b.comp.layout.x ? a : b;
+          const target =
+            a.comp.layout.y > b.comp.layout.y ||
+            (a.comp.layout.y === b.comp.layout.y && a.comp.layout.x >= b.comp.layout.x)
+              ? a
+              : b;
           const anchor = target === a ? b : a;
           const nextX = snap(anchor.comp.layout!.x + anchor.w + MIN_CLEARANCE_MM + GRID_MM);
-          if (nextX > target.comp.layout!.x) {
+          if (maxRightMm !== undefined && nextX + target.w > maxRightMm) {
+            target.comp.layout!.x = MARGIN_X_MM;
+            target.comp.layout!.y = snap(
+              Math.max(target.comp.layout!.y, anchor.comp.layout!.y + anchor.h + MIN_CLEARANCE_MM + GRID_MM),
+            );
+            moved = true;
+          } else if (nextX > target.comp.layout!.x) {
             target.comp.layout!.x = nextX;
+            moved = true;
+          } else {
+            target.comp.layout!.y = snap(anchor.comp.layout!.y + anchor.h + MIN_CLEARANCE_MM + GRID_MM);
             moved = true;
           }
         }

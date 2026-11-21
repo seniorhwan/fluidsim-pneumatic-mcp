@@ -295,6 +295,7 @@ export function simulateCircuit(doc: CircuitDocument, options: SimOptions = {}):
       label: cs.label,
       positionMm: cs.positionMm,
       strokeMm: cs.strokeMm,
+      ...(cs.unit === 'deg' ? { unit: 'deg' as const } : {}),
       pct: Math.round((cs.positionMm / cs.strokeMm) * 100),
       activeMarkers: [...cs.activeMarkers],
     };
@@ -306,6 +307,36 @@ export function simulateCircuit(doc: CircuitDocument, options: SimOptions = {}):
       pilotLeftBar: Number(vs.pilotLeftBar.toFixed(2)),
       pilotRightBar: Number(vs.pilotRightBar.toFixed(2)),
     };
+  }
+  if (Object.keys(pneuState.vacuum).length > 0) {
+    finalState.vacuum = {};
+    for (const [id, v] of Object.entries(pneuState.vacuum)) {
+      finalState.vacuum[id] = {
+        label: v.label,
+        pressureBar: v.pressureBar,
+        gripped: v.gripped,
+      };
+    }
+  }
+  if (Object.keys(pneuState.pressureSwitches).length > 0) {
+    finalState.pressureSwitches = {};
+    for (const [id, ps] of Object.entries(pneuState.pressureSwitches)) {
+      finalState.pressureSwitches[id] = {
+        label: ps.label,
+        active: ps.triggered,
+        diffBar: ps.pressureBar,
+        thresholdBar: ps.thresholdBar,
+      };
+    }
+  }
+  if (Object.keys(pneuState.gauges).length > 0) {
+    finalState.gauges = {};
+    for (const [id, g] of Object.entries(pneuState.gauges)) {
+      finalState.gauges[id] = {
+        label: g.label,
+        pressureBar: g.pressureBar,
+      };
+    }
   }
   for (const c of doc.components) {
     if (

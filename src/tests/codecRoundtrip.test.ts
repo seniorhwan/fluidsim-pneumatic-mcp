@@ -13,6 +13,7 @@ import {
   encodeCtContainer,
 } from '../codec/ctBinaryCodec';
 import type { PreservedCtSections } from '../codec/ctTextCodec';
+import type { CircuitDocument } from '../contracts/circuit';
 import { EngineeringError } from '../contracts/errors';
 import { generateCircuitFromSpec } from '../authoring/specGenerator';
 import { applyCircuitPatch } from '../authoring/patchEngine';
@@ -344,3 +345,104 @@ test('generated native .ct files emit distinct catalog-offset port coordinates a
     assert.ok(x1s === x2s || y1s === y2s, `Non-orthogonal native .ct wire segment: ${seg}`);
   }
 });
+
+test('ctBinaryCodec recognizes all 3 official FluidSIM 4.x/4.5 magic header prefixes', () => {
+  const goldenBytes = fs.readFileSync(
+    path.resolve(process.cwd(), 'fixtures', 'golden', '01_direct_indirect_cylinders.ct'),
+  );
+  const altPrefixes = [
+    Buffer.from('3e6c75423f56daaf205628b0c36c08bb', 'hex'),
+    Buffer.from('6e33c0a621ce30e820ce6fa953336de9', 'hex'),
+    Buffer.from('7f8943f87a219c112021f2680b898bcf', 'hex'),
+  ];
+
+  for (const prefix of altPrefixes) {
+    const mutated = Buffer.from(goldenBytes);
+    prefix.copy(mutated, 0);
+    const detected = detectCircuitFormat(mutated, 'variant.ct');
+    assert.equal(detected.format, 'fluidsim-4.5-ct');
+    const decoded = decodeCtContainer(mutated, 'variant.ct');
+    assert.ok(decoded.ctBody.length > 50);
+  }
+});
+
+test('newly verified FluidSIM 4.5 classes (WV_2, WV_4, FilterP, CheckValveP, PEW, PVS3, DRSV2_pneu, LWechsler, LRelaismagnet_abfver, EX4) roundtrip cleanly in native .ct', () => {
+  const doc: CircuitDocument = {
+    schemaVersion: '1.0' as const,
+    metadata: {
+      title: 'Verified 4.5 Classes Roundtrip',
+      fluidsimVersion: '4.5' as const,
+      format: 'fsim-ir-json' as const,
+      sheetSize: 'DIN_A3_LANDSCAPE' as const,
+      sheetDomain: 'electro-pneumatic' as const,
+      sheetWidthMm: 420,
+      sheetHeightMm: 297,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    components: [
+      { id: 'SRC', type: 'air_source' as const, label: 'P1', params: { pressureBar: 6, maxFlowLMin: 1000 } },
+      { id: 'REG', type: 'pressure_regulator' as const, label: 'PR1', params: { setPressureBar: 5 } },
+      { id: 'FLT', type: 'air_filter' as const, label: 'F1', rotationDeg: 90 as const, params: {} },
+      { id: 'J1', type: 'pneumatic_junction' as const, params: {} },
+      { id: 'PLUG', type: 'blind_plug' as const, params: {} },
+      {
+        id: 'V22',
+        type: 'valve_2_2' as const,
+        label: 'V22',
+        params: { normalState: 'NC', normallyOpen: false, nominalFlowLMin: 300 },
+        leftActuation: { type: 'solenoid' as const, label: 'Y1', manualOverride: true, internalPilot: true },
+        rightActuation: { type: 'pneumatic_spring' as const, springReturn: true },
+      },
+      { id: 'CHK', type: 'check_valve' as const, params: { crackingPressureBar: 0.05 } },
+      { id: 'CHKS', type: 'check_valve_spring' as const, params: { crackingPressureBar: 0.2 } },
+      { id: 'PEW1', type: 'pressure_switch_differential' as const, label: 'B1', params: { pressureBar: 3.0, triggerMode: 'above' } },
+      { id: 'PWR24', type: 'power_24v' as const, label: '+24V', params: { voltageV: 24 } },
+      { id: 'PWR0', type: 'power_0v' as const, label: '0V', params: {} },
+      { id: 'T_OFF', type: 'timer_relay_off_delay' as const, label: 'T1', params: { delayMs: 500 } },
+      { id: 'SW_CO', type: 'relay_contact_changeover' as const, label: 'T1', params: {} },
+      { id: 'SOL1', type: 'valve_solenoid' as const, label: 'Y1', params: {} },
+    ],
+    connections: [
+      { id: 'E1', from: { componentId: 'SRC', port: '1' }, to: { componentId: 'REG', port: '1' }, domain: 'pneumatic' as const },
+      { id: 'E2', from: { componentId: 'REG', port: '2' }, to: { componentId: 'FLT', port: '1' }, domain: 'pneumatic' as const },
+      { id: 'E3', from: { componentId: 'FLT', port: '2' }, to: { componentId: 'J1', port: '1' }, domain: 'pneumatic' as const },
+      { id: 'E4', from: { componentId: 'J1', port: '2' }, to: { componentId: 'V22', port: '1' }, domain: 'pneumatic' as const },
+      { id: 'E5', from: { componentId: 'J1', port: '3' }, to: { componentId: 'PLUG', port: '1' }, domain: 'pneumatic' as const },
+      { id: 'E6', from: { componentId: 'V22', port: '2' }, to: { componentId: 'CHK', port: '1' }, domain: 'pneumatic' as const },
+      { id: 'E7', from: { componentId: 'CHK', port: '2' }, to: { componentId: 'CHKS', port: '1' }, domain: 'pneumatic' as const },
+      { id: 'E8', from: { componentId: 'CHKS', port: '2' }, to: { componentId: 'PEW1', port: 'P1' }, domain: 'pneumatic' as const },
+      { id: 'E9', from: { componentId: 'PWR24', port: 'OUT' }, to: { componentId: 'T_OFF', port: 'A1' }, domain: 'electrical' as const },
+      { id: 'E10', from: { componentId: 'T_OFF', port: 'A2' }, to: { componentId: 'PWR0', port: 'IN' }, domain: 'electrical' as const },
+      { id: 'E11', from: { componentId: 'PWR24', port: 'OUT' }, to: { componentId: 'SW_CO', port: '11' }, domain: 'electrical' as const },
+      { id: 'E12', from: { componentId: 'SW_CO', port: '14' }, to: { componentId: 'SOL1', port: 'A1' }, domain: 'electrical' as const },
+      { id: 'E13', from: { componentId: 'SOL1', port: 'A2' }, to: { componentId: 'PWR0', port: 'IN' }, domain: 'electrical' as const },
+    ],
+  };
+
+  const ctBytes = serializeCircuitDocument(doc, { targetPath: 'verified_classes.ct' });
+  const decoded = decodeCtContainer(ctBytes, 'verified_classes.ct');
+  assert.ok(decoded.ctBody.includes('WV_2 '));
+  assert.ok(decoded.ctBody.includes('FilterP '));
+  assert.ok(decoded.ctBody.includes('CheckValveP '));
+  assert.ok(decoded.ctBody.includes('CheckValvePilotOperatedSpringLoadedP '));
+  assert.ok(decoded.ctBody.includes('PEW '));
+  assert.ok(decoded.ctBody.includes('PressureReducingValve3WaysAdjustableP '));
+  assert.ok(decoded.ctBody.includes('LWechsler '));
+  assert.ok(decoded.ctBody.includes('LRelaismagnet_abfver '));
+
+  const { document: reparsed } = parseCircuitBuffer(ctBytes, 'verified_classes.ct');
+  const val = validateCircuitStatic(reparsed);
+  assert.equal(val.valid, true, JSON.stringify(val.findings));
+  assert.equal(val.errorCount, 0);
+  assert.equal(reparsed.metadata.sheetWidthMm, 420);
+  assert.equal(reparsed.metadata.sheetHeightMm, 297);
+  const flt = reparsed.components.find((c) => c.id === 'FLT');
+  assert.equal(flt?.rotationDeg, 90);
+  const v22 = reparsed.components.find((c) => c.id === 'V22');
+  assert.equal(v22?.leftActuation?.manualOverride, true);
+  assert.equal(v22?.leftActuation?.internalPilot, true);
+  assert.equal(v22?.rightActuation?.type, 'pneumatic_spring');
+  assert.equal(v22?.rightActuation?.springReturn, true);
+});
+

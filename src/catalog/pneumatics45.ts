@@ -2,14 +2,22 @@ import type { CatalogComponentDef, ComponentCategory, Domain, PortDefinition } f
 
 /**
  * Verified ISO 1219 & Festo FluidSIM Pneumatics 4.5 Component Catalog.
- * 23/34 components have empirically verified `fluidsim45Id` class names extracted from
- * real FluidSIM `.ct` files in `fixtures/golden/`. The remaining 11 components keep
- * `fluidsim45IdVerified: false` (never hallucinated) and roundtrip losslessly via
- * `_MCP_TYPE`/`_MCP_PARAMS` in `.ct` and natively in `.fsim.json`.
+ * Includes full standard FluidSIM Pneumatics 4.5 library coverage:
+ * - Supply & conditioning (air source, FRL, filter, reservoir, manifolds, exhaust silencer, blind plug)
+ * - Linear & rotary actuators (single-acting, double-acting, rodless, semi-rotary swivel drive, air motor)
+ * - Directional control valves (2/2, 3/2, 4/2, 5/2, 5/3 with NC/NO & composite actuation)
+ * - Flow, shut-off, pressure & pneumatic logic valves (one-way flow control, throttle, check valves, quick exhaust, OR/AND, timer, sequence, regulator, relief)
+ * - Vacuum technology (Venturi suction nozzle / ejector, vacuum suction cup)
+ * - Measuring & pressure/vacuum switches (differential/vacuum pressure switch PEW, manometer)
+ * - Electrical 24V/0V ladder control (rails, junctions, switches, sensors, relays, timers, counters, solenoids, lamps)
+ *
+ * Class IDs marked `fluidsim45IdVerified: true` are empirically verified from real FluidSIM 4.5
+ * golden fixtures and official `sym/` library files. Remaining items keep `fluidsim45IdVerified: false`
+ * (never hallucinated) and roundtrip 100% losslessly via `_MCP_TYPE`/`_MCP_PARAMS`.
  */
 export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   // =========================================================================
-  // 1. AIR SUPPLY & CONDITIONING
+  // 1. AIR SUPPLY, CONDITIONING & DISTRIBUTION
   // =========================================================================
   {
     type: 'air_source',
@@ -50,6 +58,44 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     layoutLayer: 4,
   },
   {
+    type: 'air_filter',
+    fluidsim45Id: 'FilterP',
+    fluidsim45IdVerified: true,
+    displayName: 'Air Filter (Standalone)',
+    category: 'air_supply',
+    domain: 'pneumatic',
+    description: 'Standalone inline pneumatic/vacuum air filter element (FluidSIM 4.5 FilterP).',
+    keywords: ['filter', 'air filter', 'vacuum filter', 'conditioning', 'inline'],
+    ports: [
+      { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 0, y: 8 } },
+      { name: '2', domain: 'pneumatic', role: 'working', required: true, offset: { x: 16, y: 8 } },
+    ],
+    parameters: [
+      { key: 'nominalFlowLMin', type: 'number', defaultValue: 500, unit: 'l/min', min: 10, max: 5000, description: 'Nominal filter conductance flow rate' },
+    ],
+    defaultSize: { width: 16, height: 16 },
+    layoutLayer: 1,
+  },
+  {
+    type: 'air_reservoir',
+    fluidsim45Id: 'FS45_PENDING_AIR_RESERVOIR',
+    fluidsim45IdVerified: false,
+    displayName: 'Compressed Air Reservoir / Tank',
+    category: 'air_supply',
+    domain: 'pneumatic',
+    description: 'Pneumatic air buffer vessel / pressure reservoir tank.',
+    keywords: ['reservoir', 'tank', 'accumulator', 'buffer', 'vessel'],
+    ports: [
+      { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 0, y: 8 } },
+      { name: '2', domain: 'pneumatic', role: 'working', required: false, offset: { x: 20, y: 8 } },
+    ],
+    parameters: [
+      { key: 'volumeL', type: 'number', defaultValue: 1.0, unit: 'l', min: 0.01, max: 100, description: 'Internal reservoir volume' },
+    ],
+    defaultSize: { width: 20, height: 16 },
+    layoutLayer: 3,
+  },
+  {
     type: 'exhaust_silencer',
     fluidsim45Id: 'PConnection:EX3',
     fluidsim45IdVerified: true,
@@ -66,14 +112,30 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     layoutLayer: 3,
   },
   {
+    type: 'blind_plug',
+    fluidsim45Id: 'PConnection:EX4',
+    fluidsim45IdVerified: true,
+    displayName: 'Blind Plug / Port Blanking Terminator',
+    category: 'air_supply',
+    domain: 'pneumatic',
+    description: 'ISO 1219 blanking plug (|—) sealing unused valve ports or manifold bus ends (FluidSIM PConnection EX4).',
+    keywords: ['blind plug', 'plug', 'blanking', 'cap', 'manifold', 'seal', 'terminator'],
+    ports: [
+      { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 0, y: 4 } },
+    ],
+    parameters: [],
+    defaultSize: { width: 8, height: 8 },
+    layoutLayer: 3,
+  },
+  {
     type: 'pneumatic_junction',
     fluidsim45Id: 'PTriconnection',
     fluidsim45IdVerified: true,
-    displayName: 'Pneumatic T-Junction / Manifold',
+    displayName: 'Pneumatic T-Junction',
     category: 'air_supply',
     domain: 'pneumatic',
-    description: 'Pneumatic distribution node connecting multiple lines at equal pressure.',
-    keywords: ['tee', 'junction', 'manifold', 'branch', 'splitter'],
+    description: 'Pneumatic distribution node connecting up to 4 lines at equal pressure.',
+    keywords: ['tee', 'junction', 'branch', 'splitter'],
     ports: [
       { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 0, y: 4 } },
       { name: '2', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 4 } },
@@ -84,9 +146,34 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     defaultSize: { width: 8, height: 8 },
     layoutLayer: 3,
   },
+  {
+    type: 'pneumatic_manifold',
+    fluidsim45Id: 'FS45_PENDING_MANIFOLD',
+    fluidsim45IdVerified: false,
+    displayName: 'Pneumatic Distribution Manifold / Bus Rail',
+    category: 'air_supply',
+    domain: 'pneumatic',
+    description: 'Multi-port pneumatic manifold rail (e.g., Festo CPV10 shared supply/exhaust/pilot bus with up to 8 ports).',
+    keywords: ['manifold', 'bus', 'rail', 'cpv10', 'valve terminal', 'distributor'],
+    ports: [
+      { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 0, y: 5 } },
+      { name: '2', domain: 'pneumatic', role: 'working', required: true, offset: { x: 6, y: 0 } },
+      { name: '3', domain: 'pneumatic', role: 'working', required: false, offset: { x: 12, y: 0 } },
+      { name: '4', domain: 'pneumatic', role: 'working', required: false, offset: { x: 18, y: 0 } },
+      { name: '5', domain: 'pneumatic', role: 'working', required: false, offset: { x: 24, y: 0 } },
+      { name: '6', domain: 'pneumatic', role: 'working', required: false, offset: { x: 30, y: 0 } },
+      { name: '7', domain: 'pneumatic', role: 'working', required: false, offset: { x: 36, y: 0 } },
+      { name: '8', domain: 'pneumatic', role: 'working', required: false, offset: { x: 40, y: 5 } },
+    ],
+    parameters: [
+      { key: 'busRole', type: 'enum', defaultValue: 'supply', enumValues: ['supply', 'exhaust', 'pilot', 'auxiliary'], description: 'Functional role of manifold gallery (e.g. 1, 11, 3/5, 12/14, 82/84)' },
+    ],
+    defaultSize: { width: 40, height: 10 },
+    layoutLayer: 3,
+  },
 
   // =========================================================================
-  // 2. ACTUATORS
+  // 2. LINEAR & ROTARY ACTUATORS
   // =========================================================================
   {
     type: 'cylinder_single_acting',
@@ -136,10 +223,142 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     layoutLayer: 0,
     supportsDistanceRule: true,
   },
+  {
+    type: 'cylinder_rodless',
+    fluidsim45Id: 'FS45_PENDING_CYLINDER_RODLESS',
+    fluidsim45IdVerified: false,
+    displayName: 'Rodless Linear Cylinder',
+    category: 'actuator',
+    domain: 'pneumatic',
+    description: 'Double-acting rodless pneumatic linear actuator with symmetric chamber areas and distance rule support.',
+    keywords: ['rodless', 'linear drive', 'cylinder', 'actuator', 'dgc'],
+    ports: [
+      { name: 'A', domain: 'pneumatic', role: 'working', required: true, offset: { x: 6, y: 18 } },
+      { name: 'B', domain: 'pneumatic', role: 'working', required: true, offset: { x: 38, y: 18 } },
+    ],
+    parameters: [
+      { key: 'strokeMm', type: 'number', defaultValue: 200, unit: 'mm', min: 10, max: 3000, description: 'Full carriage stroke' },
+      { key: 'pistonDiameterMm', type: 'number', defaultValue: 25, unit: 'mm', min: 8, max: 100, description: 'Internal bore diameter' },
+      { key: 'externalLoadN', type: 'number', defaultValue: 0, unit: 'N', min: 0, max: 5000, description: 'External opposing load force' },
+      { key: 'initialPositionMm', type: 'number', defaultValue: 0, unit: 'mm', min: 0, max: 3000, description: 'Initial carriage position' },
+    ],
+    defaultSize: { width: 46, height: 18 },
+    layoutLayer: 0,
+    supportsDistanceRule: true,
+  },
+  {
+    type: 'swivel_drive',
+    fluidsim45Id: 'FS45_PENDING_SWIVEL_DRIVE',
+    fluidsim45IdVerified: false,
+    displayName: 'Semi-Rotary / Swivel Drive',
+    category: 'actuator',
+    domain: 'pneumatic',
+    description: 'Double-acting semi-rotary vane/rack-and-pinion swivel actuator (e.g., Festo DSM/DRQD 180 deg) with angular limit sensor markers.',
+    keywords: ['swivel', 'semi-rotary', 'rotary actuator', 'vane', '180', 'dsm', 'turn'],
+    ports: [
+      { name: 'A', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 22 } },
+      { name: 'B', domain: 'pneumatic', role: 'working', required: true, offset: { x: 24, y: 22 } },
+    ],
+    parameters: [
+      { key: 'maxAngleDeg', type: 'number', defaultValue: 180, unit: 'deg', min: 15, max: 360, description: 'Maximum swivel angle (default 180 deg)' },
+      { key: 'initialAngleDeg', type: 'number', defaultValue: 0, unit: 'deg', min: 0, max: 360, description: 'Initial swivel angle in degrees' },
+      { key: 'torqueNm', type: 'number', defaultValue: 5, unit: 'Nm', min: 0.2, max: 200, description: 'Rated swivel torque at 6 bar' },
+      { key: 'externalLoadNm', type: 'number', defaultValue: 0, unit: 'Nm', min: 0, max: 200, description: 'External opposing torque load' },
+    ],
+    defaultSize: { width: 32, height: 22 },
+    layoutLayer: 0,
+    supportsDistanceRule: true,
+  },
+  {
+    type: 'air_motor',
+    fluidsim45Id: 'FS45_PENDING_AIR_MOTOR',
+    fluidsim45IdVerified: false,
+    displayName: 'Pneumatic Air Motor',
+    category: 'actuator',
+    domain: 'pneumatic',
+    description: 'Bidirectional continuous-rotation pneumatic vane/piston air motor.',
+    keywords: ['air motor', 'rotary motor', 'pneumatic motor', 'continuous rotation'],
+    ports: [
+      { name: 'A', domain: 'pneumatic', role: 'working', required: true, offset: { x: 6, y: 20 } },
+      { name: 'B', domain: 'pneumatic', role: 'working', required: true, offset: { x: 20, y: 20 } },
+    ],
+    parameters: [
+      { key: 'nominalRpm', type: 'number', defaultValue: 1200, unit: 'rpm', min: 50, max: 20000, description: 'Nominal rotation speed at 6 bar' },
+    ],
+    defaultSize: { width: 26, height: 20 },
+    layoutLayer: 0,
+  },
 
   // =========================================================================
-  // 3. DIRECTIONAL CONTROL VALVES (DCVs)
+  // 3. VACUUM TECHNOLOGY
   // =========================================================================
+  {
+    type: 'vacuum_suction_nozzle',
+    fluidsim45Id: 'FS45_PENDING_VACUUM_EJECTOR',
+    fluidsim45IdVerified: false,
+    displayName: 'Vacuum Suction Nozzle (Venturi Ejector)',
+    category: 'vacuum',
+    domain: 'pneumatic',
+    description: 'Venturi vacuum generator producing negative gauge pressure on port 1v when port 1 is supplied and port 3 exhausts.',
+    keywords: ['vacuum', 'venturi', 'suction nozzle', 'ejector', 'generator', '1v'],
+    ports: [
+      { name: '1', domain: 'pneumatic', role: 'supply', required: true, offset: { x: 0, y: 8 } },
+      { name: '3', domain: 'pneumatic', role: 'exhaust', required: true, offset: { x: 24, y: 8 } },
+      { name: '1v', domain: 'pneumatic', role: 'vacuum', required: true, offset: { x: 12, y: 0 } },
+    ],
+    parameters: [
+      { key: 'vacuumBar', type: 'number', defaultValue: -0.7, unit: 'bar', min: -0.95, max: -0.1, description: 'Generated gauge vacuum pressure at nominal supply' },
+      { key: 'minSupplyBar', type: 'number', defaultValue: 3.0, unit: 'bar', min: 1.0, max: 8.0, description: 'Minimum supply pressure at port 1 to sustain Venturi vacuum' },
+    ],
+    defaultSize: { width: 24, height: 16 },
+    layoutLayer: 2,
+  },
+  {
+    type: 'vacuum_sucker',
+    fluidsim45Id: 'FS45_PENDING_VACUUM_SUCKER',
+    fluidsim45IdVerified: false,
+    displayName: 'Vacuum Suction Cup (Sucker)',
+    category: 'vacuum',
+    domain: 'pneumatic',
+    description: 'Vacuum gripper suction cup; grips workpiece when port 1v pressure drops below gripThresholdBar and releases on blow-off/vent.',
+    keywords: ['suction cup', 'sucker', 'vacuum gripper', 'vacuum', 'pad', '1v'],
+    ports: [
+      { name: '1v', domain: 'pneumatic', role: 'vacuum', required: true, offset: { x: 10, y: 16 } },
+    ],
+    parameters: [
+      { key: 'gripThresholdBar', type: 'number', defaultValue: -0.3, unit: 'bar', min: -0.95, max: -0.05, description: 'Gauge vacuum threshold required to grip workpiece' },
+    ],
+    defaultSize: { width: 20, height: 16 },
+    layoutLayer: 0,
+  },
+
+  // =========================================================================
+  // 4. DIRECTIONAL CONTROL VALVES (DCVs)
+  // =========================================================================
+  {
+    type: 'valve_2_2',
+    fluidsim45Id: 'WV_2',
+    fluidsim45IdVerified: true,
+    displayName: '2/2-Way Directional Control Valve',
+    category: 'directional_valve',
+    domain: 'hybrid',
+    description: '2/2-way shut-off/switching directional valve (FluidSIM 4.5 WV_2, NC or NO) with configurable left/right actuation.',
+    keywords: ['2/2', 'valve', 'dcv', 'shut-off', 'solenoid', 'vacuum', 'blow-off', 'wv_2'],
+    ports: [
+      { name: '1', domain: 'pneumatic', role: 'supply', required: true, offset: { x: 12, y: 16 } },
+      { name: '2', domain: 'pneumatic', role: 'working', required: true, offset: { x: 12, y: 0 } },
+      { name: '12', domain: 'pneumatic', role: 'pilot', required: false, offset: { x: 0, y: 8 } },
+      { name: '10', domain: 'pneumatic', role: 'pilot', required: false, offset: { x: 24, y: 8 } },
+    ],
+    parameters: [
+      { key: 'normalState', type: 'enum', defaultValue: 'NC', enumValues: ['NC', 'NO'], description: 'Rest position: NC (1 blocked) or NO (1->2 open)' },
+      { key: 'normallyOpen', type: 'boolean', defaultValue: false, description: 'Alias for normalState="NO" (normally open in rest state)' },
+      { key: 'nominalFlowLMin', type: 'number', defaultValue: 200, unit: 'l/min', min: 10, max: 3000, description: 'Nominal conductance flow rate' },
+    ],
+    defaultSize: { width: 24, height: 16 },
+    layoutLayer: 2,
+    supportsActuationConfig: true,
+  },
   {
     type: 'valve_3_2',
     fluidsim45Id: 'WV_3',
@@ -147,8 +366,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     displayName: '3/2-Way Directional Control Valve',
     category: 'directional_valve',
     domain: 'hybrid',
-    description: '3/2-way valve (NC or NO) with configurable left/right manual, roller, pilot, solenoid, or spring actuation.',
-    keywords: ['3/2', 'valve', 'dcv', 'pushbutton', 'roller', 'limit', 'pilot', 'solenoid'],
+    description: '3/2-way valve (NC or NO) with configurable left/right manual, roller, pilot, pneumatic_spring, solenoid, or spring actuation.',
+    keywords: ['3/2', 'valve', 'dcv', 'pushbutton', 'roller', 'limit', 'pilot', 'solenoid', 'normally open'],
     ports: [
       { name: '1', domain: 'pneumatic', role: 'supply', required: true, offset: { x: 10, y: 16 } },
       { name: '2', domain: 'pneumatic', role: 'working', required: true, offset: { x: 10, y: 0 } },
@@ -158,6 +377,7 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     ],
     parameters: [
       { key: 'normalState', type: 'enum', defaultValue: 'NC', enumValues: ['NC', 'NO'], description: 'Rest position: NC (1 blocked, 2->3) or NO (1->2, 3 blocked)' },
+      { key: 'normallyOpen', type: 'boolean', defaultValue: false, description: 'Alias for normalState="NO" (normally open in rest state)' },
       { key: 'nominalFlowLMin', type: 'number', defaultValue: 120, unit: 'l/min', min: 10, max: 2000, description: 'Nominal conductance flow rate' },
     ],
     defaultSize: { width: 26, height: 16 },
@@ -166,13 +386,13 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'valve_4_2',
-    fluidsim45Id: 'FS45_PENDING_VALVE_4_2',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'WV_4',
+    fluidsim45IdVerified: true,
     displayName: '4/2-Way Directional Control Valve',
     category: 'directional_valve',
     domain: 'hybrid',
-    description: '4/2-way directional control valve with configurable actuation on ports 14 (left) and 12 (right).',
-    keywords: ['4/2', 'valve', 'dcv', 'pilot', 'solenoid', 'double-acting'],
+    description: '4/2-way directional control valve (FluidSIM 4.5 WV_4) with configurable actuation on ports 14 (left) and 12 (right).',
+    keywords: ['4/2', 'valve', 'dcv', 'pilot', 'solenoid', 'double-acting', 'wv_4'],
     ports: [
       { name: '1', domain: 'pneumatic', role: 'supply', required: true, offset: { x: 10, y: 16 } },
       { name: '2', domain: 'pneumatic', role: 'working', required: true, offset: { x: 20, y: 0 } },
@@ -196,8 +416,8 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     displayName: '5/2-Way Directional Control Valve',
     category: 'directional_valve',
     domain: 'hybrid',
-    description: '5/2-way directional control valve (memory/bistable or spring-return) with ports 1, 2, 3, 4, 5, 14 (extend), 12 (retract).',
-    keywords: ['5/2', 'valve', 'dcv', 'bistable', 'memory', 'pilot', 'solenoid', 'spring'],
+    description: '5/2-way directional control valve (memory/bistable or spring/pneumatic-spring return) with ports 1, 2, 3, 4, 5, 14, 12.',
+    keywords: ['5/2', 'valve', 'dcv', 'bistable', 'memory', 'pilot', 'solenoid', 'spring', 'wv_5'],
     ports: [
       { name: '1', domain: 'pneumatic', role: 'supply', required: true, offset: { x: 16, y: 16 } },
       { name: '2', domain: 'pneumatic', role: 'working', required: true, offset: { x: 22, y: 0 } },
@@ -217,13 +437,13 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'valve_5_3',
-    fluidsim45Id: 'FS45_PENDING_VALVE_5_3',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'WV_5',
+    fluidsim45IdVerified: true,
     displayName: '5/3-Way Directional Control Valve',
     category: 'directional_valve',
     domain: 'hybrid',
-    description: '5/3-way spring-centered directional valve with closed, exhausted, or pressurized center position.',
-    keywords: ['5/3', 'valve', 'dcv', 'mid-position', 'closed center', 'exhausted center', 'pressurized center'],
+    description: '5/3-way spring-centered directional valve (FluidSIM 4.5 WV_5 BODY_COUNT=3) with closed, exhausted, or pressurized center.',
+    keywords: ['5/3', 'valve', 'dcv', 'mid-position', 'closed center', 'exhausted center', 'pressurized center', 'wv_5'],
     ports: [
       { name: '1', domain: 'pneumatic', role: 'supply', required: true, offset: { x: 20, y: 16 } },
       { name: '2', domain: 'pneumatic', role: 'working', required: true, offset: { x: 26, y: 0 } },
@@ -243,7 +463,7 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
 
   // =========================================================================
-  // 4. FLOW, PRESSURE & LOGIC VALVES
+  // 5. FLOW, SHUT-OFF, PRESSURE & LOGIC VALVES
   // =========================================================================
   {
     type: 'flow_control_one_way',
@@ -266,13 +486,71 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     layoutLayer: 1,
   },
   {
-    type: 'quick_exhaust_valve',
-    fluidsim45Id: 'FS45_PENDING_QUICK_EXHAUST',
+    type: 'throttle_valve',
+    fluidsim45Id: 'FS45_PENDING_THROTTLE_VALVE',
     fluidsim45IdVerified: false,
+    displayName: 'Throttle Valve (Bidirectional)',
+    category: 'flow_pressure_logic',
+    domain: 'pneumatic',
+    description: 'Adjustable bidirectional pneumatic throttle restricting flow equally in both directions.',
+    keywords: ['throttle', 'restrictor', 'bidirectional', 'flow control', 'blow-off'],
+    ports: [
+      { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 16 } },
+      { name: '2', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 0 } },
+    ],
+    parameters: [
+      { key: 'openingPct', type: 'number', defaultValue: 50, unit: '%', min: 1, max: 100, description: 'Throttle opening percentage' },
+    ],
+    defaultSize: { width: 14, height: 16 },
+    layoutLayer: 1,
+  },
+  {
+    type: 'check_valve',
+    fluidsim45Id: 'CheckValveP',
+    fluidsim45IdVerified: true,
+    displayName: 'Check Valve (Non-Return)',
+    category: 'flow_pressure_logic',
+    domain: 'pneumatic',
+    description: 'Non-return check valve allowing free flow from port 1 to port 2 and blocking reverse flow (FluidSIM 4.5 CheckValveP).',
+    keywords: ['check valve', 'non-return', 'one-way', 'backflow'],
+    ports: [
+      { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 16 } },
+      { name: '2', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 0 } },
+    ],
+    parameters: [
+      { key: 'crackingPressureBar', type: 'number', defaultValue: 0.1, unit: 'bar', min: 0, max: 6, description: 'Forward cracking pressure' },
+    ],
+    defaultSize: { width: 14, height: 16 },
+    layoutLayer: 1,
+  },
+  {
+    type: 'check_valve_spring',
+    fluidsim45Id: 'CheckValvePilotOperatedSpringLoadedP',
+    fluidsim45IdVerified: true,
+    displayName: 'Spring-Loaded Check Valve (Optional Pilot)',
+    category: 'flow_pressure_logic',
+    domain: 'pneumatic',
+    description: 'Spring-loaded non-return check valve (FluidSIM 4.5 CheckValvePilotOperatedSpringLoadedP); allows flow 1->2 above crackingPressureBar and blocks 2->1 unless pilot 12 unlocks.',
+    keywords: ['check valve', 'spring-loaded', 'non-return', 'vacuum check', 'pilot check'],
+    ports: [
+      { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 16 } },
+      { name: '2', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 0 } },
+      { name: '12', domain: 'pneumatic', role: 'pilot', required: false, offset: { x: 0, y: 8 } },
+    ],
+    parameters: [
+      { key: 'crackingPressureBar', type: 'number', defaultValue: 0.3, unit: 'bar', min: 0, max: 6, description: 'Spring cracking differential pressure' },
+    ],
+    defaultSize: { width: 16, height: 16 },
+    layoutLayer: 1,
+  },
+  {
+    type: 'quick_exhaust_valve',
+    fluidsim45Id: 'DV_P1',
+    fluidsim45IdVerified: true,
     displayName: 'Quick Exhaust Valve',
     category: 'flow_pressure_logic',
     domain: 'pneumatic',
-    description: 'Vents cylinder chamber directly at port 3 when supply at port 1 drops.',
+    description: 'Vents cylinder chamber directly at port 3 when supply at port 1 drops (FluidSIM 4.5 sf9/DV_P1).',
     keywords: ['quick exhaust', 'fast', 'vent', 'speed'],
     ports: [
       { name: '1', domain: 'pneumatic', role: 'supply', required: true, offset: { x: 8, y: 16 } },
@@ -285,13 +563,13 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'shuttle_valve_or',
-    fluidsim45Id: 'FS45_PENDING_SHUTTLE_OR',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'PVS3',
+    fluidsim45IdVerified: true,
     displayName: 'Shuttle Valve (Pneumatic OR)',
     category: 'flow_pressure_logic',
     domain: 'pneumatic',
-    description: 'Outputs highest pressure from either input port 1 or 1_2 to port 2.',
-    keywords: ['shuttle', 'or', 'logic', 'valve'],
+    description: 'Outputs highest pressure from either input port 1 or 1_2 to port 2 (FluidSIM 4.5 PVS3).',
+    keywords: ['shuttle', 'or', 'logic', 'valve', 'pvs3'],
     ports: [
       { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 0, y: 8 } },
       { name: '1_2', domain: 'pneumatic', role: 'working', required: true, offset: { x: 20, y: 8 } },
@@ -303,13 +581,13 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'dual_pressure_valve_and',
-    fluidsim45Id: 'FS45_PENDING_DUAL_PRESSURE_AND',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'DRSV2_pneu',
+    fluidsim45IdVerified: true,
     displayName: 'Dual-Pressure Valve (Pneumatic AND)',
     category: 'flow_pressure_logic',
     domain: 'pneumatic',
-    description: 'Outputs pressure at port 2 only when both input ports 1 and 1_2 are pressurized.',
-    keywords: ['dual-pressure', 'and', 'two-hand', 'logic', 'valve'],
+    description: 'Outputs pressure at port 2 only when both input ports 1 and 1_2 are pressurized (FluidSIM 4.5 DRSV2_pneu).',
+    keywords: ['dual-pressure', 'and', 'two-hand', 'logic', 'valve', 'drsv2'],
     ports: [
       { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 0, y: 8 } },
       { name: '1_2', domain: 'pneumatic', role: 'working', required: true, offset: { x: 20, y: 8 } },
@@ -364,12 +642,12 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'pressure_regulator',
-    fluidsim45Id: 'FS45_PENDING_PRESSURE_REGULATOR',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'PressureReducingValve3WaysAdjustableP',
+    fluidsim45IdVerified: true,
     displayName: 'Pressure Regulator Valve',
     category: 'flow_pressure_logic',
     domain: 'pneumatic',
-    description: 'Limits downstream pressure at port 2 to setPressureBar.',
+    description: 'Limits downstream pressure at port 2 to setPressureBar (FluidSIM 4.5 PressureReducingValve3WaysAdjustableP).',
     keywords: ['regulator', 'pressure reducing', 'bar'],
     ports: [
       { name: '1', domain: 'pneumatic', role: 'supply', required: true, offset: { x: 0, y: 8 } },
@@ -381,9 +659,72 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     defaultSize: { width: 18, height: 16 },
     layoutLayer: 3,
   },
+  {
+    type: 'pressure_relief_valve',
+    fluidsim45Id: 'FS45_PENDING_PRESSURE_RELIEF',
+    fluidsim45IdVerified: false,
+    displayName: 'Pressure Relief / Safety Valve',
+    category: 'flow_pressure_logic',
+    domain: 'pneumatic',
+    description: 'Limits line pressure by venting excess air from port 1 to exhaust port 3 above reliefPressureBar.',
+    keywords: ['relief', 'safety valve', 'overpressure', 'pressure limiting'],
+    ports: [
+      { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 16 } },
+      { name: '3', domain: 'pneumatic', role: 'exhaust', required: true, offset: { x: 18, y: 8 } },
+    ],
+    parameters: [
+      { key: 'reliefPressureBar', type: 'number', defaultValue: 6.5, unit: 'bar', min: 0.5, max: 12, description: 'Relief cracking pressure' },
+    ],
+    defaultSize: { width: 18, height: 16 },
+    layoutLayer: 3,
+  },
 
   // =========================================================================
-  // 5. ELECTRICAL CONTROL (24V / 0V LADDER)
+  // 6. MEASURING INSTRUMENTS & PRESSURE / VACUUM SWITCHES
+  // =========================================================================
+  {
+    type: 'pressure_switch_differential',
+    fluidsim45Id: 'PEW',
+    fluidsim45IdVerified: true,
+    displayName: 'Differential / Vacuum Pressure Switch (PEW)',
+    category: 'measuring',
+    domain: 'hybrid',
+    description: 'Adjustable pneumatic-to-electrical differential or vacuum pressure switch (FluidSIM 4.5 PEW). Switches bound electrical contacts sharing its label when P1-P2 crosses pressureBar.',
+    keywords: ['pressure switch', 'vacuum switch', 'differential', 'pew', 'sensor', 'b1', '-2b1'],
+    ports: [
+      { name: 'P1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 8, y: 16 } },
+      { name: 'P2', domain: 'pneumatic', role: 'working', required: false, offset: { x: 16, y: 16 } },
+    ],
+    parameters: [
+      { key: 'pressureBar', type: 'number', defaultValue: -0.5, unit: 'bar', min: -1.0, max: 12.0, description: 'Switching threshold in gauge bar (negative for vacuum switches, e.g. -0.5 bar)' },
+      { key: 'hysteresisBar', type: 'number', defaultValue: 0.05, unit: 'bar', min: 0, max: 2.0, description: 'Switching hysteresis band' },
+      { key: 'triggerMode', type: 'enum', defaultValue: 'auto', enumValues: ['auto', 'above', 'below'], description: 'auto: below when pressureBar<0, above when pressureBar>=0' },
+    ],
+    defaultSize: { width: 22, height: 16 },
+    layoutLayer: 1,
+  },
+  {
+    type: 'pressure_gauge',
+    fluidsim45Id: 'FS45_PENDING_PRESSURE_GAUGE',
+    fluidsim45IdVerified: false,
+    displayName: 'Pressure / Vacuum Gauge (Manometer)',
+    category: 'measuring',
+    domain: 'pneumatic',
+    description: 'Pneumatic pressure or vacuum manometer reading line pressure at port 1.',
+    keywords: ['gauge', 'manometer', 'pressure meter', 'vacuum gauge', 'indicator'],
+    ports: [
+      { name: '1', domain: 'pneumatic', role: 'working', required: true, offset: { x: 6, y: 12 } },
+    ],
+    parameters: [
+      { key: 'minBar', type: 'number', defaultValue: -1.0, unit: 'bar', min: -1.0, max: 0, description: 'Scale minimum gauge pressure' },
+      { key: 'maxBar', type: 'number', defaultValue: 10.0, unit: 'bar', min: 1.0, max: 20.0, description: 'Scale maximum gauge pressure' },
+    ],
+    defaultSize: { width: 12, height: 12 },
+    layoutLayer: 1,
+  },
+
+  // =========================================================================
+  // 7. ELECTRICAL CONTROL (24V / 0V LADDER)
   // =========================================================================
   {
     type: 'power_24v',
@@ -483,7 +824,7 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     displayName: 'Limit Switch Contact (NO)',
     category: 'electrical_switch',
     domain: 'electrical',
-    description: 'Normally open roller limit switch bound by label to a cylinder distance-rule marker (e.g., a1).',
+    description: 'Normally open roller limit switch bound by label to a cylinder/swivel distance-rule marker or pressure switch (e.g., a1, -2B1).',
     keywords: ['limit switch', 'sensor', 'roller', 'no', 'distance rule', 'a0', 'a1'],
     ports: [
       { name: '13', domain: 'electrical', role: 'contact_in', required: true, offset: { x: 5, y: 0 } },
@@ -500,7 +841,7 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     displayName: 'Limit Switch Contact (NC)',
     category: 'electrical_switch',
     domain: 'electrical',
-    description: 'Normally closed roller limit switch bound by label to a cylinder distance-rule marker.',
+    description: 'Normally closed roller limit switch bound by label to a cylinder/swivel distance-rule marker or pressure switch.',
     keywords: ['limit switch', 'sensor', 'roller', 'nc', 'distance rule'],
     ports: [
       { name: '11', domain: 'electrical', role: 'contact_in', required: true, offset: { x: 5, y: 0 } },
@@ -517,7 +858,7 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     displayName: 'Magnetic Proximity Switch (Reed)',
     category: 'electrical_switch',
     domain: 'electrical',
-    description: 'Magnetic reed proximity sensor bound by label to a cylinder distance-rule position.',
+    description: 'Magnetic reed proximity sensor bound by label to a cylinder/swivel distance-rule position.',
     keywords: ['proximity', 'magnetic', 'reed', 'sensor', 'cylinder sensor'],
     ports: [
       { name: '13', domain: 'electrical', role: 'contact_in', required: true, offset: { x: 5, y: 0 } },
@@ -553,7 +894,7 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     displayName: 'Relay Contact (NO)',
     category: 'electrical_relay',
     domain: 'electrical',
-    description: 'Normally open contact actuated by a relay, timer, or counter with the same label.',
+    description: 'Normally open contact actuated by a relay, timer, counter, or pressure switch with the same label.',
     keywords: ['contact', 'relay', 'no', 'make', 'latch'],
     ports: [
       { name: '13', domain: 'electrical', role: 'contact_in', required: true, offset: { x: 5, y: 0 } },
@@ -570,7 +911,7 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
     displayName: 'Relay Contact (NC)',
     category: 'electrical_relay',
     domain: 'electrical',
-    description: 'Normally closed contact actuated by a relay, timer, or counter with the same label.',
+    description: 'Normally closed contact actuated by a relay, timer, counter, or pressure switch with the same label.',
     keywords: ['contact', 'relay', 'nc', 'break', 'interlock'],
     ports: [
       { name: '11', domain: 'electrical', role: 'contact_in', required: true, offset: { x: 5, y: 0 } },
@@ -582,13 +923,13 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'relay_contact_changeover',
-    fluidsim45Id: 'FS45_PENDING_RELAY_CONTACT_CO',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'LWechsler',
+    fluidsim45IdVerified: true,
     displayName: 'Relay Changeover Contact (SPDT)',
     category: 'electrical_relay',
     domain: 'electrical',
-    description: 'Single-pole double-throw relay contact (11=COM, 12=NC, 14=NO).',
-    keywords: ['changeover', 'spdt', 'contact', 'relay'],
+    description: 'Single-pole double-throw relay contact (11=COM, 12=NC, 14=NO; FluidSIM 4.5 LWechsler).',
+    keywords: ['changeover', 'spdt', 'contact', 'relay', 'lwechsler'],
     ports: [
       { name: '11', domain: 'electrical', role: 'contact_com', required: true, offset: { x: 6, y: 0 } },
       { name: '12', domain: 'electrical', role: 'contact_nc', required: false, offset: { x: 2, y: 14 } },
@@ -619,12 +960,12 @@ export const PNEUMATICS_45_CATALOG: readonly CatalogComponentDef[] = [
   },
   {
     type: 'timer_relay_off_delay',
-    fluidsim45Id: 'FS45_PENDING_TIMER_OFF',
-    fluidsim45IdVerified: false,
+    fluidsim45Id: 'LRelaismagnet_abfver',
+    fluidsim45IdVerified: true,
     displayName: 'OFF-Delay Timer Relay (T1..Tn)',
     category: 'electrical_relay',
     domain: 'electrical',
-    description: 'Energizes linked contacts immediately on coil power and holds them for delayMs after coil de-energizes.',
+    description: 'Energizes linked contacts immediately on coil power and holds them for delayMs after coil de-energizes (FluidSIM 4.5 LRelaismagnet_abfver).',
     keywords: ['timer', 'off-delay', 'tof', 'delay', 'relay'],
     ports: [
       { name: 'A1', domain: 'electrical', role: 'coil_in', required: true, offset: { x: 6, y: 0 } },

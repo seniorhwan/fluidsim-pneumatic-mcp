@@ -11,6 +11,7 @@ export type PortRole =
   | 'working'
   | 'exhaust'
   | 'pilot'
+  | 'vacuum'
   | 'power_pos'
   | 'power_neg'
   | 'coil_in'
@@ -27,6 +28,8 @@ export type ComponentCategory =
   | 'actuator'
   | 'directional_valve'
   | 'flow_pressure_logic'
+  | 'vacuum'
+  | 'measuring'
   | 'electrical_power'
   | 'electrical_switch'
   | 'electrical_relay'
@@ -39,11 +42,12 @@ export type ValveActuationType =
   | 'roller'
   | 'idle_return_roller'
   | 'pneumatic_pilot'
+  | 'pneumatic_spring'
   | 'solenoid'
   | 'spring';
 
 export interface PortDefinition {
-  /** ISO 1219 or IEC port label (e.g., "1", "2", "3", "4", "5", "12", "14", "A1", "A2", "13", "14", "11", "12"). */
+  /** ISO 1219 or IEC port label (e.g., "1", "2", "3", "4", "5", "12", "14", "1v", "P1", "P2", "A1", "A2"). */
   name: string;
   domain: PortDomain;
   role: PortRole;
@@ -66,9 +70,9 @@ export interface ParameterSpec {
 export interface CatalogComponentDef {
   /** Canonical semantic type name used by agents. */
   type: string;
-  /** FluidSIM 4.5 internal symbol/object identifier. Marked verified once confirmed against golden .ct fixtures. */
+  /** FluidSIM 4.5 internal symbol/object identifier. Marked verified once confirmed against golden .ct fixtures or sym/ audit. */
   fluidsim45Id: string;
-  /** True only after empirically verified against golden FluidSIM 4.5 .ct fixtures in Phase 1. */
+  /** True only when empirically verified against real FluidSIM 4.5 .ct files. */
   fluidsim45IdVerified: boolean;
   displayName: string;
   category: ComponentCategory;
@@ -81,7 +85,7 @@ export interface CatalogComponentDef {
   defaultSize: { width: number; height: number };
   /** Preferred vertical ISO 1219 layout layer (0=top actuators ... 4=bottom air supply, 10+=ladder). */
   layoutLayer: number;
-  /** Supports distance rule markers (cylinders). */
+  /** Supports distance rule markers (linear cylinders, rodless cylinders, swivel drives). */
   supportsDistanceRule?: boolean;
   /** Supports pilot/solenoid label bindings on left/right sides (directional valves). */
   supportsActuationConfig?: boolean;

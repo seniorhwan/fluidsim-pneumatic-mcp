@@ -13,6 +13,44 @@ export interface PatchApplySummary {
   removedConnections: string[];
 }
 
+function normalizeComponentNode(node: ComponentNode, explicitParams?: Record<string, number | string | boolean>): ComponentNode {
+  const params = { ...node.params };
+  let rotationDeg = node.rotationDeg ?? node.layout?.rotationDeg;
+  if (params.rotationDeg !== undefined) {
+    const rot = Number(params.rotationDeg);
+    if (rot === 0 || rot === 90 || rot === 180 || rot === 270) {
+      rotationDeg = rot;
+    }
+    delete params.rotationDeg;
+  }
+
+  if (node.type === 'valve_2_2' || node.type === 'valve_3_2') {
+    if (explicitParams && typeof explicitParams.normallyOpen === 'boolean') {
+      params.normallyOpen = explicitParams.normallyOpen;
+      params.normalState = explicitParams.normallyOpen ? 'NO' : 'NC';
+    } else if (explicitParams && typeof explicitParams.normalState === 'string') {
+      params.normalState = explicitParams.normalState;
+      params.normallyOpen = explicitParams.normalState === 'NO';
+    } else if (typeof params.normallyOpen === 'boolean') {
+      params.normalState = params.normallyOpen ? 'NO' : 'NC';
+    } else if (typeof params.normalState === 'string') {
+      params.normallyOpen = params.normalState === 'NO';
+    }
+  }
+
+  return {
+    ...node,
+    rotationDeg,
+    layout: node.layout
+      ? {
+          ...node.layout,
+          rotationDeg: rotationDeg ?? node.layout.rotationDeg ?? 0,
+        }
+      : undefined,
+    params,
+  };
+}
+
 /**
  * Applies an ordered batch of patch operations transactionally in memory.
  * On any preflight or invariant failure, throws EngineeringError leaving the original document untouched.
@@ -44,10 +82,13 @@ export function applyCircuitPatch(
     switch (op.op) {
       case 'add_component': {
         const defaults = getDefaultParams(op.component.type);
-        const node: ComponentNode = {
-          ...op.component,
-          params: { ...defaults, ...(op.component.params ?? {}) },
-        };
+        const node = normalizeComponentNode(
+          {
+            ...op.component,
+            params: { ...defaults, ...(op.component.params ?? {}) },
+          },
+          op.component.params,
+        );
         working.components.push(node);
         addedComponents.push(node.id);
         break;
@@ -57,11 +98,14 @@ export function applyCircuitPatch(
         const idx = working.components.findIndex((c) => c.id === op.id);
         if (idx >= 0) {
           const prev = working.components[idx];
-          working.components[idx] = {
-            ...prev,
-            ...op.patch,
-            params: { ...prev.params, ...(op.patch.params ?? {}) },
-          };
+          working.components[idx] = normalizeComponentNode(
+            {
+              ...prev,
+              ...op.patch,
+              params: { ...prev.params, ...(op.patch.params ?? {}) },
+            },
+            op.patch.params,
+          );
           updatedComponents.push(op.id);
         }
         break;

@@ -1,12 +1,23 @@
 import type { CircuitDocument, ComponentNode, ConnectionEdge } from '../contracts/circuit';
-import type { StaticValidationFinding, StaticValidationReport } from '../contracts/simulation';
+import type {
+  StaticValidationFinding,
+  StaticValidationOptions,
+  StaticValidationReport,
+} from '../contracts/simulation';
 import { getCatalogComponent, getPortDefinition } from '../catalog/pneumatics45';
 
 function portKey(componentId: string, port: string): string {
   return `${componentId}::${port}`;
 }
 
-export function validateCircuitStatic(doc: CircuitDocument): StaticValidationReport {
+export function validateCircuitStatic(
+  doc: CircuitDocument,
+  options?: StaticValidationOptions,
+): StaticValidationReport {
+  const allowExternalElectricalSheet =
+    options?.allowExternalElectricalSheet === true ||
+    doc.metadata.allowExternalElectricalSheet === true ||
+    doc.metadata.sheetDomain === 'pneumatic-only';
   const findings: StaticValidationFinding[] = [];
   const compById = new Map<string, ComponentNode>();
   const connectedPorts = new Set<string>();
@@ -194,7 +205,12 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
 
   const airSources = doc.components.filter((c) => c.type === 'air_source');
   const pneumaticWorkComps = pneumaticComps.filter(
-    (c) => c.type !== 'air_source' && c.type !== 'exhaust_silencer' && c.type !== 'pneumatic_junction',
+    (c) =>
+      c.type !== 'air_source' &&
+      c.type !== 'exhaust_silencer' &&
+      c.type !== 'pneumatic_junction' &&
+      c.type !== 'pneumatic_manifold' &&
+      c.type !== 'blind_plug',
   );
   if (pneumaticWorkComps.length > 0 && airSources.length === 0) {
     findings.push({
@@ -211,36 +227,46 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
   for (const comp of pneumaticComps) {
     const def = getCatalogComponent(comp.type);
     if (!def) continue;
-    for (const p of def.ports) {
-      if (!p.required) continue;
-      const pk = portKey(comp.id, p.name);
-      if (!connectedPorts.has(pk)) {
-        if (p.role === 'exhaust') {
-          findings.push({
-            severity: 'error',
-            category: 'PneumaticRuleViolation',
-            code: 'MISSING_EXHAUST_TERMINATOR',
-            message: `Exhaust port "${p.name}" on ${comp.id} (${comp.type}) is open with no exhaust_silencer terminator.`,
-            offendingIds: [comp.id],
-            suggestedFix: `Add an "exhaust_silencer" component and connect it to ${comp.id}.${p.name}.`,
-          });
-        } else {
-          findings.push({
-            severity: 'error',
-            category: 'PneumaticRuleViolation',
-            code: 'OPEN_PNEUMATIC_PORT',
-            message: `Required pneumatic ${p.role} port "${p.name}" on ${comp.id} (${comp.type}) is unconnected.`,
-            offendingIds: [comp.id],
-            suggestedFix: `Connect ${comp.id}.${p.name} to the appropriate pneumatic line, supply, or actuator port.`,
-          });
+    // Symmetric multi-port distribution nodes (pneumatic_junction / pneumatic_manifold)
+    // are valid once any 2+ ports are connected (validated by DANGLING_JUNCTION below).
+    const isSymmetricDistributor =
+      comp.type === 'pneumatic_junction' || comp.type === 'pneumatic_manifold';
+    const wiredPortCount = isSymmetricDistributor
+      ? def.ports.filter((p) => connectedPorts.has(portKey(comp.id, p.name))).length
+      : 0;
+
+    if (!isSymmetricDistributor || wiredPortCount < 2) {
+      for (const p of def.ports) {
+        if (!p.required) continue;
+        const pk = portKey(comp.id, p.name);
+        if (!connectedPorts.has(pk)) {
+          if (p.role === 'exhaust') {
+            findings.push({
+              severity: 'error',
+              category: 'PneumaticRuleViolation',
+              code: 'MISSING_EXHAUST_TERMINATOR',
+              message: `Exhaust port "${p.name}" on ${comp.id} (${comp.type}) is open with no exhaust_silencer terminator.`,
+              offendingIds: [comp.id],
+              suggestedFix: `Add an "exhaust_silencer" component and connect it to ${comp.id}.${p.name}.`,
+            });
+          } else {
+            findings.push({
+              severity: 'error',
+              category: 'PneumaticRuleViolation',
+              code: 'OPEN_PNEUMATIC_PORT',
+              message: `Required pneumatic ${p.role} port "${p.name}" on ${comp.id} (${comp.type}) is unconnected.`,
+              offendingIds: [comp.id],
+              suggestedFix: `Connect ${comp.id}.${p.name} to the appropriate pneumatic line, supply, or actuator port.`,
+            });
+          }
         }
       }
     }
 
-    // Check pneumatic pilot ports if actuation is pneumatic_pilot
+    // Check pneumatic pilot ports if actuation is pneumatic_pilot (pneumatic_spring is internal, no external port required)
     if (def.supportsActuationConfig) {
-      const leftPilotPort = comp.type === 'valve_3_2' ? '12' : '14';
-      const rightPilotPort = comp.type === 'valve_3_2' ? '10' : '12';
+      const leftPilotPort = comp.type === 'valve_3_2' || comp.type === 'valve_2_2' ? '12' : '14';
+      const rightPilotPort = comp.type === 'valve_3_2' || comp.type === 'valve_2_2' ? '10' : '12';
       if (comp.leftActuation?.type === 'pneumatic_pilot' && !connectedPorts.has(portKey(comp.id, leftPilotPort))) {
         findings.push({
           severity: 'error',
@@ -248,7 +274,7 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
           code: 'UNCONNECTED_PILOT_PORT',
           message: `Valve ${comp.id} has leftActuation="pneumatic_pilot" but pilot port "${leftPilotPort}" is unconnected.`,
           offendingIds: [comp.id],
-          suggestedFix: `Connect a pilot signal line to ${comp.id}.${leftPilotPort} or change leftActuation.`,
+          suggestedFix: `Connect a pilot signal line to ${comp.id}.${leftPilotPort} or use "pneumatic_spring" if internally air-spring returned.`,
         });
       }
       if (comp.rightActuation?.type === 'pneumatic_pilot' && !connectedPorts.has(portKey(comp.id, rightPilotPort))) {
@@ -258,7 +284,7 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
           code: 'UNCONNECTED_PILOT_PORT',
           message: `Valve ${comp.id} has rightActuation="pneumatic_pilot" but pilot port "${rightPilotPort}" is unconnected.`,
           offendingIds: [comp.id],
-          suggestedFix: `Connect a pilot signal line to ${comp.id}.${rightPilotPort} or change rightActuation.`,
+          suggestedFix: `Connect a pilot signal line to ${comp.id}.${rightPilotPort} or use "pneumatic_spring" if internally air-spring returned.`,
         });
       }
       if (
@@ -271,7 +297,7 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
           code: 'UNACTUATED_VALVE',
           message: `Directional valve ${comp.id} (${comp.type}) has neither leftActuation nor rightActuation configured and can never switch.`,
           offendingIds: [comp.id],
-          suggestedFix: `Configure leftActuation (e.g. solenoid, pneumatic_pilot, pushbutton, roller) and rightActuation (e.g. spring or pilot) on ${comp.id}.`,
+          suggestedFix: `Configure leftActuation (e.g. solenoid, pneumatic_pilot, pushbutton, roller) and rightActuation (e.g. spring, pneumatic_spring, or pilot) on ${comp.id}.`,
         });
       }
     }
@@ -288,10 +314,24 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
           suggestedFix: `Connect at least 2 pneumatic lines to ${comp.id} or remove the unused junction.`,
         });
       }
+    } else if (comp.type === 'pneumatic_manifold') {
+      const wiredCount = ['1', '2', '3', '4', '5', '6', '7', '8'].filter((pn) =>
+        connectedPorts.has(portKey(comp.id, pn)),
+      ).length;
+      if (wiredCount < 2) {
+        findings.push({
+          severity: 'warning',
+          category: 'PneumaticRuleViolation',
+          code: 'DANGLING_JUNCTION',
+          message: `Pneumatic manifold ${comp.id} has only ${wiredCount} connected port(s).`,
+          offendingIds: [comp.id],
+          suggestedFix: `Connect at least 2 pneumatic lines/plugs to ${comp.id} or remove the unused manifold.`,
+        });
+      }
     }
   }
 
-  // 4b. Check for double-acting cylinder chamber A directly shorted to chamber B on same hose/junction net
+  // 4b. Check for double-acting / rodless / swivel actuator chamber A directly shorted to chamber B
   const pneuDirectGraph = new Map<string, Set<string>>();
   const linkDirect = (a: string, b: string): void => {
     if (!pneuDirectGraph.has(a)) pneuDirectGraph.set(a, new Set());
@@ -308,10 +348,20 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
       linkDirect(portKey(c.id, '1'), portKey(c.id, '2'));
       linkDirect(portKey(c.id, '1'), portKey(c.id, '3'));
       linkDirect(portKey(c.id, '1'), portKey(c.id, '4'));
+    } else if (c.type === 'pneumatic_manifold') {
+      for (const pn of ['2', '3', '4', '5', '6', '7', '8']) {
+        linkDirect(portKey(c.id, '1'), portKey(c.id, pn));
+      }
     }
   }
   for (const c of pneumaticComps) {
-    if (c.type !== 'cylinder_double_acting') continue;
+    if (
+      c.type !== 'cylinder_double_acting' &&
+      c.type !== 'cylinder_rodless' &&
+      c.type !== 'swivel_drive'
+    ) {
+      continue;
+    }
     const start = portKey(c.id, 'A');
     const target = portKey(c.id, 'B');
     const seen = new Set<string>([start]);
@@ -364,11 +414,24 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
       if (!comp) continue;
       // Traverse through supply-forwarding components
       const forwardPorts: string[] = [];
-      if (comp.type === 'air_service_unit' || comp.type === 'pressure_regulator') {
+      if (
+        comp.type === 'air_service_unit' ||
+        comp.type === 'pressure_regulator' ||
+        comp.type === 'pressure_relief_valve'
+      ) {
         if (pname === '1') forwardPorts.push('2');
       } else if (comp.type === 'pneumatic_junction') {
         forwardPorts.push('1', '2', '3', '4');
-      } else if (comp.type === 'flow_control_one_way') {
+      } else if (comp.type === 'pneumatic_manifold') {
+        forwardPorts.push('1', '2', '3', '4', '5', '6', '7', '8');
+      } else if (
+        comp.type === 'flow_control_one_way' ||
+        comp.type === 'throttle_valve' ||
+        comp.type === 'air_filter' ||
+        comp.type === 'air_reservoir' ||
+        comp.type === 'check_valve' ||
+        comp.type === 'check_valve_spring'
+      ) {
         if (pname === '1') forwardPorts.push('2');
         if (pname === '2') forwardPorts.push('1');
       } else if (comp.type === 'quick_exhaust_valve') {
@@ -376,11 +439,14 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
       } else if (comp.type === 'shuttle_valve_or' || comp.type === 'dual_pressure_valve_and') {
         if (pname === '1' || pname === '1_2') forwardPorts.push('2');
       } else if (
+        comp.type === 'valve_2_2' ||
         comp.type === 'valve_3_2' ||
         comp.type === 'time_delay_valve' ||
         comp.type === 'pressure_sequence_valve'
       ) {
         if (pname === '1') forwardPorts.push('2');
+      } else if (comp.type === 'vacuum_suction_nozzle') {
+        if (pname === '1') forwardPorts.push('1v');
       } else if (comp.type === 'valve_4_2' || comp.type === 'valve_5_2' || comp.type === 'valve_5_3') {
         if (pname === '1') forwardPorts.push('2', '4');
       }
@@ -398,12 +464,14 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
       const def = getCatalogComponent(comp.type);
       if (!def) continue;
       if (
+        comp.type === 'valve_2_2' ||
         comp.type === 'valve_3_2' ||
         comp.type === 'valve_4_2' ||
         comp.type === 'valve_5_2' ||
         comp.type === 'valve_5_3' ||
         comp.type === 'time_delay_valve' ||
-        comp.type === 'pressure_sequence_valve'
+        comp.type === 'pressure_sequence_valve' ||
+        comp.type === 'vacuum_suction_nozzle'
       ) {
         const supplyKey = portKey(comp.id, '1');
         if (connectedPorts.has(supplyKey) && !visitedPorts.has(supplyKey)) {
@@ -420,30 +488,49 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
     }
   }
 
-  // 6. Label cross-reference validation (distance rules, limit switches, relays, solenoids)
+  // 6. Label cross-reference validation (distance rules, pressure switches, limit switches, relays, solenoids)
   const distanceMarkers = new Map<string, string[]>();
+  const pressureSwitchLabels = new Map<string, string[]>();
   const coilLabels = new Map<string, string[]>();
   const solenoidLabels = new Map<string, string[]>();
   const valveSolenoidRefs = new Map<string, string[]>();
 
   for (const comp of doc.components) {
     if (comp.distanceRule) {
-      const stroke = typeof comp.params.strokeMm === 'number' ? comp.params.strokeMm : 100;
+      const maxSpan =
+        comp.type === 'swivel_drive'
+          ? typeof comp.params.maxAngleDeg === 'number'
+            ? comp.params.maxAngleDeg
+            : 180
+          : typeof comp.params.strokeMm === 'number'
+            ? comp.params.strokeMm
+            : comp.type === 'cylinder_single_acting'
+              ? 50
+              : comp.type === 'cylinder_rodless'
+                ? 200
+                : 100;
+      const unit = comp.type === 'swivel_drive' ? 'deg' : 'mm';
       for (const m of comp.distanceRule) {
         const list = distanceMarkers.get(m.label) ?? [];
         list.push(comp.id);
         distanceMarkers.set(m.label, list);
-        if (m.positionMm < 0 || m.positionMm > stroke) {
+        if (m.positionMm < 0 || m.positionMm > maxSpan) {
           findings.push({
             severity: 'error',
             category: 'PneumaticRuleViolation',
             code: 'DISTANCE_RULE_OUT_OF_STROKE',
-            message: `Distance-rule marker "${m.label}" (${m.positionMm} mm) on ${comp.id} exceeds stroke (${stroke} mm).`,
+            message: `Distance-rule marker "${m.label}" (${m.positionMm} ${unit}) on ${comp.id} exceeds span (${maxSpan} ${unit}).`,
             offendingIds: [comp.id],
-            suggestedFix: `Set marker "${m.label}" positionMm within [0, ${stroke}].`,
+            suggestedFix: `Set marker "${m.label}" positionMm within [0, ${maxSpan}].`,
           });
         }
       }
+    }
+
+    if (comp.type === 'pressure_switch_differential' && comp.label) {
+      const list = pressureSwitchLabels.get(comp.label) ?? [];
+      list.push(comp.id);
+      pressureSwitchLabels.set(comp.label, list);
     }
 
     if (
@@ -546,16 +633,18 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
     }
   }
 
-  for (const [label, valveIds] of valveSolenoidRefs.entries()) {
-    if (!solenoidLabels.has(label)) {
-      findings.push({
-        severity: 'error',
-        category: 'ElectricalRuleViolation',
-        code: 'UNBOUND_VALVE_SOLENOID',
-        message: `Valve(s) ${valveIds.join(', ')} reference solenoid "${label}", but no electrical valve_solenoid "${label}" exists.`,
-        offendingIds: valveIds,
-        suggestedFix: `Add a "valve_solenoid" component with label "${label}" in the 24V/0V ladder and wire A1/A2.`,
-      });
+  if (!allowExternalElectricalSheet) {
+    for (const [label, valveIds] of valveSolenoidRefs.entries()) {
+      if (!solenoidLabels.has(label)) {
+        findings.push({
+          severity: 'error',
+          category: 'ElectricalRuleViolation',
+          code: 'UNBOUND_VALVE_SOLENOID',
+          message: `Valve(s) ${valveIds.join(', ')} reference solenoid "${label}", but no electrical valve_solenoid "${label}" exists.`,
+          offendingIds: valveIds,
+          suggestedFix: `Add a "valve_solenoid" component with label "${label}" in the 24V/0V ladder, or set allowExternalElectricalSheet=true / sheetDomain="pneumatic-only" for pneumatic-only sheets.`,
+        });
+      }
     }
   }
 
@@ -566,14 +655,14 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
       comp.type === 'limit_switch_nc' ||
       comp.type === 'proximity_switch_magnetic'
     ) {
-      if (!comp.label || !distanceMarkers.has(comp.label)) {
+      if (!comp.label || (!distanceMarkers.has(comp.label) && !pressureSwitchLabels.has(comp.label))) {
         findings.push({
           severity: 'error',
           category: 'ElectricalRuleViolation',
           code: 'ORPHANED_SENSOR_BINDING',
-          message: `Sensor "${comp.id}" (${comp.type}) references label "${comp.label ?? '<none>'}", which is not defined on any cylinder distanceRule.`,
+          message: `Sensor "${comp.id}" (${comp.type}) references label "${comp.label ?? '<none>'}", which is not defined on any actuator distanceRule or pressure switch.`,
           offendingIds: [comp.id],
-          suggestedFix: `Add marker "${comp.label ?? 'a1'}" to the target cylinder via set_distance_rule or update the sensor label.`,
+          suggestedFix: `Add marker "${comp.label ?? 'a1'}" to the target actuator via set_distance_rule or add a matching pressure_switch_differential.`,
         });
       }
     }
@@ -583,14 +672,14 @@ export function validateCircuitStatic(doc: CircuitDocument): StaticValidationRep
       comp.type === 'relay_contact_nc' ||
       comp.type === 'relay_contact_changeover'
     ) {
-      if (!comp.label || !coilLabels.has(comp.label)) {
+      if (!comp.label || (!coilLabels.has(comp.label) && !pressureSwitchLabels.has(comp.label))) {
         findings.push({
           severity: 'error',
           category: 'ElectricalRuleViolation',
           code: 'ORPHANED_RELAY_CONTACT',
-          message: `Relay contact "${comp.id}" references coil "${comp.label ?? '<none>'}", which does not exist.`,
+          message: `Relay contact "${comp.id}" references coil/switch "${comp.label ?? '<none>'}", which does not exist.`,
           offendingIds: [comp.id],
-          suggestedFix: `Add a relay_coil/timer/counter labeled "${comp.label ?? 'K1'}" or fix the contact label.`,
+          suggestedFix: `Add a relay_coil/timer/counter/pressure_switch_differential labeled "${comp.label ?? 'K1'}" or fix the contact label.`,
         });
       }
     }

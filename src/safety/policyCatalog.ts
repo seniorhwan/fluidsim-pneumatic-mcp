@@ -75,6 +75,14 @@ export const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = {
   },
 
   // Group C: Headless Authoring & Refactoring
+  project_create: {
+    name: 'project_create',
+    group: 'author',
+    mutatesDisk: true,
+    requiresAuthoring: true,
+    defaultMaxPayloadBytes: 16_384,
+    description: 'Create a FluidSIM project folder inside the workspace with optional starter circuit.',
+  },
   circuit_create: {
     name: 'circuit_create',
     group: 'author',
@@ -82,6 +90,30 @@ export const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = {
     requiresAuthoring: true,
     defaultMaxPayloadBytes: 16_384,
     description: 'Create a new circuit file from a standard template inside the workspace jail.',
+  },
+  circuit_clone: {
+    name: 'circuit_clone',
+    group: 'author',
+    mutatesDisk: true,
+    requiresAuthoring: true,
+    defaultMaxPayloadBytes: 16_384,
+    description: 'Clone an existing circuit file to a new path (optionally converting between .fsim.json and .ct).',
+  },
+  circuit_rename: {
+    name: 'circuit_rename',
+    group: 'author',
+    mutatesDisk: true,
+    requiresAuthoring: true,
+    defaultMaxPayloadBytes: 16_384,
+    description: 'Rename or move a circuit file inside the workspace jail.',
+  },
+  circuit_delete: {
+    name: 'circuit_delete',
+    group: 'author',
+    mutatesDisk: true,
+    requiresAuthoring: true,
+    defaultMaxPayloadBytes: 16_384,
+    description: 'Delete a circuit file inside the workspace jail.',
   },
   circuit_apply_patch: {
     name: 'circuit_apply_patch',

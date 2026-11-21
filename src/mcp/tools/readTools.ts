@@ -42,7 +42,14 @@ export function handleCircuitInspect(ctx: McpToolContext, args: { path: string }
         id: c.id,
         label: c.label,
         type: c.type,
-        strokeMm: typeof c.params.strokeMm === 'number' ? c.params.strokeMm : 100,
+        strokeMm:
+          c.type === 'swivel_drive'
+            ? typeof c.params.maxAngleDeg === 'number'
+              ? c.params.maxAngleDeg
+              : 180
+            : typeof c.params.strokeMm === 'number'
+              ? c.params.strokeMm
+              : 100,
         distanceRule: (c.distanceRule ?? []).map((m) => ({ label: m.label, positionMm: m.positionMm })),
       });
     } else if (cat === 'directional_valve') {
@@ -94,6 +101,8 @@ export function handleCircuitInspect(ctx: McpToolContext, args: { path: string }
     path: relativePath,
     title: document.metadata.title,
     format: document.metadata.format,
+    sheetWidthMm: document.metadata.sheetWidthMm,
+    sheetHeightMm: document.metadata.sheetHeightMm,
     componentCount: document.components.length,
     connectionCount: document.connections.length,
     countsByCategory,
@@ -284,8 +293,12 @@ export function handleCircuitGetLabelMap(ctx: McpToolContext, args: { path: stri
     }
   }
 
+  const allowExternalElec =
+    document.metadata.allowExternalElectricalSheet === true ||
+    document.metadata.sheetDomain === 'pneumatic-only';
+
   for (const [label, entry] of Object.entries(solenoids)) {
-    if (entry.solenoidIds.length === 0) {
+    if (entry.solenoidIds.length === 0 && !allowExternalElec) {
       brokenBindings.push({
         kind: 'unbound_valve_solenoid',
         componentId: entry.boundValves[0] ?? label,

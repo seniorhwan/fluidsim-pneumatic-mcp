@@ -71,11 +71,36 @@ function validateComponentParams(
   }
 }
 
+function validateRotationDeg(opIndex: number, compId: string, rot: unknown): void {
+  if (rot === undefined) return;
+  if (rot !== 0 && rot !== 90 && rot !== 180 && rot !== 270) {
+    throw new EngineeringError({
+      category: 'InvalidTopology',
+      code: 'PREFLIGHT_INVALID_ROTATION',
+      message: `Patch op[${opIndex}] sets invalid rotationDeg ${JSON.stringify(rot)} on "${compId}".`,
+      offendingIds: [compId],
+      suggestedFix: 'Use rotationDeg 0, 90, 180, or 270.',
+    });
+  }
+}
+
+function getDistanceRuleMaxSpan(
+  type: ComponentNode['type'],
+  params?: Record<string, number | string | boolean>,
+): { max: number; unit: 'mm' | 'deg' } {
+  if (type === 'swivel_drive') {
+    return { max: Number(params?.maxAngleDeg ?? 180), unit: 'deg' };
+  }
+  const defaultStroke = type === 'cylinder_single_acting' ? 50 : type === 'cylinder_rodless' ? 200 : 100;
+  return { max: Number(params?.strokeMm ?? defaultStroke), unit: 'mm' };
+}
+
 function validateDistanceRuleMarkers(
   opIndex: number,
   compId: string,
-  strokeMm: number,
+  maxSpan: number,
   markers: readonly DistanceRuleMarker[],
+  unit: 'mm' | 'deg' = 'mm',
 ): void {
   const seenLabels = new Set<string>();
   for (const m of markers) {
@@ -98,13 +123,13 @@ function validateDistanceRuleMarkers(
       });
     }
     seenLabels.add(m.label);
-    if (!Number.isFinite(m.positionMm) || m.positionMm < 0 || m.positionMm > strokeMm) {
+    if (!Number.isFinite(m.positionMm) || m.positionMm < 0 || m.positionMm > maxSpan) {
       throw new EngineeringError({
         category: 'InvalidTopology',
         code: 'PREFLIGHT_MARKER_OUT_OF_STROKE',
-        message: `Patch op[${opIndex}] places marker "${m.label}" at ${m.positionMm}mm on "${compId}" outside [0, ${strokeMm}]mm.`,
+        message: `Patch op[${opIndex}] places marker "${m.label}" at ${m.positionMm}${unit} on "${compId}" outside [0, ${maxSpan}]${unit}.`,
         offendingIds: [compId],
-        suggestedFix: `Set positionMm within [0, ${strokeMm}]mm.`,
+        suggestedFix: `Set positionMm within [0, ${maxSpan}]${unit}.`,
       });
     }
   }
@@ -159,6 +184,7 @@ export function runWritePreflight(doc: CircuitDocument, ops: readonly CircuitPat
             suggestedFix: 'Call catalog_search to retrieve exact supported FluidSIM 4.5 componentType names.',
           });
         }
+        validateRotationDeg(i, comp.id, comp.rotationDeg ?? comp.params?.rotationDeg ?? comp.layout?.rotationDeg);
         if (comp.params) {
           validateComponentParams(i, comp.id, def, comp.params);
         }
@@ -169,12 +195,11 @@ export function runWritePreflight(doc: CircuitDocument, ops: readonly CircuitPat
               code: 'PREFLIGHT_UNSUPPORTED_DISTANCE_RULE',
               message: `Component "${comp.id}" (${comp.type}) does not support distanceRule markers.`,
               offendingIds: [comp.id],
-              suggestedFix: 'Only attach distanceRule markers to cylinder_single_acting or cylinder_double_acting components.',
+              suggestedFix: 'Only attach distanceRule markers to cylinder or swivel_drive actuator components.',
             });
           }
-          const defaultStroke = comp.type === 'cylinder_single_acting' ? 50 : 100;
-          const strokeMm = Number(comp.params?.strokeMm ?? defaultStroke);
-          validateDistanceRuleMarkers(i, comp.id, strokeMm, comp.distanceRule);
+          const span = getDistanceRuleMaxSpan(comp.type, comp.params);
+          validateDistanceRuleMarkers(i, comp.id, span.max, comp.distanceRule, span.unit);
         }
         if ((comp.leftActuation || comp.rightActuation) && !def.supportsActuationConfig) {
           throw new EngineeringError({
@@ -182,7 +207,7 @@ export function runWritePreflight(doc: CircuitDocument, ops: readonly CircuitPat
             code: 'PREFLIGHT_UNSUPPORTED_ACTUATION',
             message: `Component "${comp.id}" (${comp.type}) does not support leftActuation/rightActuation.`,
             offendingIds: [comp.id],
-            suggestedFix: 'Only configure valve actuation on directional valve components (valve_3_2, valve_4_2, valve_5_2, valve_5_3).',
+            suggestedFix: 'Only configure valve actuation on directional valve components (valve_2_2, valve_3_2, valve_4_2, valve_5_2, valve_5_3).',
           });
         }
         simComps.set(comp.id, { ...comp });
@@ -200,6 +225,7 @@ export function runWritePreflight(doc: CircuitDocument, ops: readonly CircuitPat
             suggestedFix: 'Inspect existing component IDs with circuit_query_components before patching.',
           });
         }
+        validateRotationDeg(i, op.id, op.patch.rotationDeg ?? op.patch.params?.rotationDeg);
         const def = getCatalogComponent(existing.type);
         if (def) {
           if (op.patch.params) {
@@ -212,13 +238,12 @@ export function runWritePreflight(doc: CircuitDocument, ops: readonly CircuitPat
                 code: 'PREFLIGHT_UNSUPPORTED_DISTANCE_RULE',
                 message: `Component "${op.id}" (${existing.type}) does not support distanceRule markers.`,
                 offendingIds: [op.id],
-                suggestedFix: 'Only set distanceRule markers on cylinder components.',
+                suggestedFix: 'Only set distanceRule markers on cylinder or swivel_drive components.',
               });
             }
             const mergedParams = { ...existing.params, ...(op.patch.params ?? {}) };
-            const defaultStroke = existing.type === 'cylinder_single_acting' ? 50 : 100;
-            const strokeMm = Number(mergedParams.strokeMm ?? defaultStroke);
-            validateDistanceRuleMarkers(i, op.id, strokeMm, op.patch.distanceRule);
+            const span = getDistanceRuleMaxSpan(existing.type, mergedParams);
+            validateDistanceRuleMarkers(i, op.id, span.max, op.patch.distanceRule, span.unit);
           }
           if ((op.patch.leftActuation || op.patch.rightActuation) && !def.supportsActuationConfig) {
             throw new EngineeringError({
@@ -388,7 +413,7 @@ export function runWritePreflight(doc: CircuitDocument, ops: readonly CircuitPat
             code: 'PREFLIGHT_COMPONENT_NOT_FOUND',
             message: `Patch op[${i}] (set_distance_rule) targets missing component "${op.componentId}".`,
             offendingIds: [op.componentId],
-            suggestedFix: 'Ensure the target cylinder exists before setting its distance rule.',
+            suggestedFix: 'Ensure the target actuator exists before setting its distance rule.',
           });
         }
         const def = getCatalogComponent(comp.type);
@@ -398,12 +423,11 @@ export function runWritePreflight(doc: CircuitDocument, ops: readonly CircuitPat
             code: 'PREFLIGHT_UNSUPPORTED_DISTANCE_RULE',
             message: `Component "${op.componentId}" (${comp.type}) does not support distanceRule markers.`,
             offendingIds: [op.componentId],
-            suggestedFix: 'Target a single-acting or double-acting cylinder.',
+            suggestedFix: 'Target a cylinder or swivel_drive actuator.',
           });
         }
-        const defaultStroke = comp.type === 'cylinder_single_acting' ? 50 : 100;
-        const strokeMm = Number(comp.params?.strokeMm ?? defaultStroke);
-        validateDistanceRuleMarkers(i, op.componentId, strokeMm, op.markers);
+        const span = getDistanceRuleMaxSpan(comp.type, comp.params);
+        validateDistanceRuleMarkers(i, op.componentId, span.max, op.markers, span.unit);
         break;
       }
 

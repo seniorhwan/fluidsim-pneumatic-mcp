@@ -1,4 +1,10 @@
-import type { CircuitDocument, ComponentNode, ConnectionEdge } from '../contracts/circuit';
+import {
+  getSheetDimensions,
+  type CircuitDocument,
+  type ComponentNode,
+  type ConnectionEdge,
+  type SheetSizePreset,
+} from '../contracts/circuit';
 import { EngineeringError } from '../contracts/errors';
 import { autoLayoutCircuit } from './layoutRouter';
 
@@ -34,6 +40,7 @@ export interface CircuitSpecRequest {
   controlMethod: ControlMethod;
   startMode?: StartMode;
   includeEStop?: boolean;
+  sheetSize?: SheetSizePreset;
 }
 
 export interface ParsedMotion {
@@ -446,14 +453,19 @@ export function generateCircuitFromSpec(spec: CircuitSpecRequest): CircuitDocume
     );
   }
 
+  const sheetSize: SheetSizePreset = spec.sheetSize ?? 'DIN_A4_LANDSCAPE';
+  const sheetDims = getSheetDimensions(sheetSize);
+
   const doc: CircuitDocument = {
     schemaVersion: '1.0',
     metadata: {
       title: spec.title ?? `${spec.sequence.join(' ')} (${spec.controlMethod})`,
       fluidsimVersion: '4.5',
       format: 'fsim-ir-json',
-      sheetWidthMm: 297,
-      sheetHeightMm: 210,
+      sheetSize,
+      sheetDomain: isElectro ? 'electro-pneumatic' : 'pneumatic-only',
+      sheetWidthMm: sheetDims.sheetWidthMm,
+      sheetHeightMm: sheetDims.sheetHeightMm,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
@@ -957,18 +969,25 @@ function buildElectroStepChain(
 
   // Output solenoid rungs
   const stepsBySolenoid = new Map<string, number[]>();
+  const singleActingSetSteps = new Map<string, number[]>();
+  const singleActingResetSteps = new Map<string, number[]>();
 
-  // Track active-extended steps for single-acting actuators (spring-return valves require continuous hold)
-  const singleActingHeld = new Map<string, boolean>();
   for (const [act, actType] of actuatorTypeByLabel.entries()) {
-    if (actType === 'single-acting') singleActingHeld.set(act, false);
+    if (actType === 'single-acting') {
+      singleActingSetSteps.set(act, []);
+      singleActingResetSteps.set(act, []);
+    }
   }
 
   steps.forEach((step, idx) => {
     if (step.kind === 'motion') {
       for (const m of step.motions) {
         if (actuatorTypeByLabel.get(m.actuator) === 'single-acting') {
-          singleActingHeld.set(m.actuator, m.direction === '+');
+          if (m.direction === '+') {
+            singleActingSetSteps.get(m.actuator)!.push(idx + 1);
+          } else {
+            singleActingResetSteps.get(m.actuator)!.push(idx + 1);
+          }
         } else {
           const sol =
             m.direction === '+'
@@ -980,19 +999,69 @@ function buildElectroStepChain(
         }
       }
     }
-    // Any single-acting actuator currently held extended keeps its solenoid energized on this step
-    for (const [act, held] of singleActingHeld.entries()) {
-      if (held) {
-        const sol = extSolenoidByActuator.get(act)!;
-        const list = stepsBySolenoid.get(sol) ?? [];
-        list.push(idx + 1);
-        stepsBySolenoid.set(sol, list);
-      }
-    }
   });
 
-  // Ensure every referenced valve solenoid has an electrical coil
+  // Dedicated memory-latch relay K_HOLD_<act> for each single-acting actuator so its 3/2 spring-return
+  // solenoid stays continuously energized across dwells and break-before-make step handoffs until <act>-.
+  for (const [act, setSteps] of singleActingSetSteps.entries()) {
+    const solLabel = extSolenoidByActuator.get(act)!;
+    const solId = `SOL_${solLabel}`;
+    addComp({ id: solId, type: 'valve_solenoid', label: solLabel, params: {} });
+    connect(solId, 'A2', 'PWR_0V', 'IN', 'electrical');
+
+    if (setSteps.length === 0) {
+      const unusedSw = `PB_MAN_${solLabel}`;
+      addComp({ id: unusedSw, type: 'pushbutton_no', label: `MAN_${solLabel}`, params: { detent: false } });
+      connect('BUS_24V', '2', unusedSw, '13', 'electrical');
+      connect(unusedSw, '14', solId, 'A1', 'electrical');
+      continue;
+    }
+
+    const holdLabel = `K_HOLD_${act}`;
+    const holdCoilId = `${holdLabel}_COIL`;
+    const holdLatchId = `${holdLabel}_LATCH`;
+    const holdSumId = `J_${holdLabel}`;
+    const holdOutId = `${holdLabel}_OUT_${solLabel}`;
+
+    addComp({ id: holdCoilId, type: 'relay_coil', label: holdLabel, params: {} });
+    addComp({ id: holdLatchId, type: 'relay_contact_no', label: holdLabel, params: {} });
+    addComp({ id: holdSumId, type: 'electrical_junction', params: {} });
+
+    // Parallel set contacts for every step commanding <act>+
+    for (const sNum of setSteps) {
+      const setContactId = `K${sNum}_SET_${holdLabel}`;
+      addComp({ id: setContactId, type: 'relay_contact_no', label: `K${sNum}`, params: {} });
+      connect('BUS_24V', '2', setContactId, '13', 'electrical');
+      connect(setContactId, '14', holdSumId, '1', 'electrical');
+    }
+
+    // Self-latch contact
+    connect('BUS_24V', '2', holdLatchId, '13', 'electrical');
+    connect(holdLatchId, '14', holdSumId, '3', 'electrical');
+
+    // Series reset NC contacts for every step commanding <act>-
+    const resetSteps = singleActingResetSteps.get(act) ?? [];
+    let tailId = holdSumId;
+    let tailPort = '2';
+    for (const rNum of resetSteps) {
+      const rstContactId = `K${rNum}_RST_${holdLabel}`;
+      addComp({ id: rstContactId, type: 'relay_contact_nc', label: `K${rNum}`, params: {} });
+      connect(tailId, tailPort, rstContactId, '11', 'electrical');
+      tailId = rstContactId;
+      tailPort = '12';
+    }
+    connect(tailId, tailPort, holdCoilId, 'A1', 'electrical');
+    connect(holdCoilId, 'A2', 'PWR_0V', 'IN', 'electrical');
+
+    // Output contact driving solenoid continuously without handoff glitch
+    addComp({ id: holdOutId, type: 'relay_contact_no', label: holdLabel, params: {} });
+    connect('BUS_24V', '2', holdOutId, '13', 'electrical');
+    connect(holdOutId, '14', solId, 'A1', 'electrical');
+  }
+
+  // Ensure every referenced double-acting valve solenoid has an electrical coil
   for (const [act, yExt] of extSolenoidByActuator.entries()) {
+    if (actuatorTypeByLabel.get(act) === 'single-acting') continue;
     if (!stepsBySolenoid.has(yExt)) stepsBySolenoid.set(yExt, []);
     const yRet = retSolenoidByActuator.get(act);
     if (yRet && !stepsBySolenoid.has(yRet)) stepsBySolenoid.set(yRet, []);
