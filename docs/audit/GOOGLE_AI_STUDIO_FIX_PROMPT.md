@@ -145,6 +145,31 @@ Using the empirically verified FluidSIM 4.5 class IDs from `sym/`:
 
 ---
 
+## Part 5: Real FluidSIM 4.5 `.ct` Open/Crash Fixes (Proven Against `fl_sim_p.exe`) (CRITICAL)
+
+Testing `v0.2.0`-generated `.ct` files directly in **Festo FluidSIM Pneumatics 4.5 (`fl_sim_p.exe`)** proved that FluidSIM crashes (`0xC0000005` / `-1073741819`) or throws `Error Code 2755 in Module 97098` / `Unknown file format.` due to two bugs:
+
+### 5.1 Fix Linear Ring-Buffer Bounds in `compressCtPayload` (`src/codec/ctBinaryCodec.ts:390-422`)
+- **Root Cause:** `compressCtPayload` uses `% ringLimit` (`ring[(ref + mlen) % ringLimit]`), emitting matches where `ref + mlen > ringLimit` (and `ref + mlen > maxFilled` before first wrap). FluidSIM 4.5's C++ decompressor reads `ring[ref .. ref + len - 1]` linearly without modulo wrap-around, causing out-of-bounds reads (`0xC0000005` / `Error 2755`).
+- **Fix:** Track `maxFilled` (initially `initRpos`) and `wrapped = false`. In the LZ match search (`lines 390-409`), set `searchLimit = wrapped ? ringLimit : maxFilled`, iterate `for (let ref = 0; ref <= searchLimit - 3; ref++)`, clamp `avail = Math.min(maxAllowedMatch, searchLimit - ref)`, and compare `ring[ref + mlen]` **without `% ringLimit`**. Assert in tests that `ref + len <= ringLimit` for every emitted token.
+
+### 5.2 Replace `PTriconnection` Placeholders & Mismatched Class IDs (`src/codec/ctTextCodec.ts`, `src/catalog/pneumatics45.ts`)
+- **Root Cause:** `v0.2.0` serializes `vacuum_sucker`, `vacuum_suction_nozzle`, and `swivel_drive` as `PTriconnection` placeholders with `< 4` gates (`1`, `2`, `3`), which crashes `fl_sim_p.exe` (`0xC0000005`). It also maps `flow_control_one_way` to `DV_P1` (Quick Exhaust) and `check_valve_spring` to `CheckValvePilotOperatedSpringLoadedP` (3-port).
+- **Fix (Verified Against Real Working `distributing station.ct`):**
+  - `vacuum_sucker` -> **`PAV1S`** (1 `PConnection` port `1v`)
+  - `vacuum_suction_nozzle` -> **`PAV1`** (3 `PConnection` ports `1`, `3`, `1v`; `S FLIPPED I 1`)
+  - `swivel_drive` -> **`PAR1b`** (2 `PConnection` ports `A`, `B`; `S ALPHA F 180`, `S l1`, `S l2`)
+  - `flow_control_one_way` -> **`DRSV2_pneu`** (`S LEVEL F <openingPct>`)
+  - `check_valve_spring` -> **`CheckValveSpringLoadedP`** (2 `PConnection` ports `1`, `2`)
+  - `pressure_switch_differential` -> **`PEW`** (2 ports `P1`, `P2`) or **`PSW1`** (1 port)
+  - Never emit `PTriconnection` with `< 4` `gate` entries.
+
+### 5.3 Remaining `v0.2.0` Simulator & Official-Corpus Issues
+- Fix `circuit_generate_from_spec` when `single-acting` + `WAIT:500ms` + `electro-pneumatic-step-chain` runs (`seqPassed: false`: `expected "B+", observed "A-"`).
+- Fix `ctTextCodec.ts` connection/junction/electrical-rung parsing so the 157/261 official FluidSIM 4.5 `.ct` files in `fl_sim_p4.en\ct\` do not produce false `OPEN_PNEUMATIC_PORT` / `UNREACHABLE_ELECTRICAL_RUNG` errors.
+
+---
+
 ## Verification Checklist
 After making all changes, run and verify all pass with exit code 0:
 1. `npm install` (must succeed cleanly without `--legacy-peer-deps`)
