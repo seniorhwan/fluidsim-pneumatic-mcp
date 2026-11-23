@@ -3,8 +3,13 @@ import path from 'node:path';
 import {
   getSheetDimensions,
   type CircuitDocument,
+  type CircuitNet,
   type CircuitPatchOp,
   type ComponentNode,
+  type FluidSimFlippedCode,
+  type MirrorMode,
+  type PortRef,
+  type PortTerminatorType,
   type SheetDomain,
   type SheetSizePreset,
 } from '../../contracts/circuit';
@@ -19,12 +24,18 @@ import {
 } from '../../authoring/specGenerator';
 import { verifyCircuitSequence } from '../../simulator/sequenceVerifier';
 import { validateCircuitStatic } from '../../simulator/validator';
+import { renderCircuitToSvg } from '../../codec/ctSvgRenderer';
 
 interface ParamEntryInput {
   key: string;
   valueString?: string;
   valueNumber?: number;
   valueBoolean?: boolean;
+}
+
+interface PortTerminatorEntryInput {
+  port: string;
+  terminator: PortTerminatorType;
 }
 
 function parseParamsBag(input?: {
@@ -82,6 +93,96 @@ function parseParamsBag(input?: {
   return result;
 }
 
+function normalizePortTerminatorValue(raw: string): PortTerminatorType {
+  if (raw === 'silencer') return 'exhaust_silencer';
+  if (raw === 'plug') return 'blind_plug';
+  return raw as PortTerminatorType;
+}
+
+function parsePortTerminatorsBag(input?: {
+  portTerminators?: Record<string, unknown> | PortTerminatorEntryInput[];
+  portTerminatorsJson?: string;
+  portTerminatorsList?: PortTerminatorEntryInput[];
+}): Record<string, PortTerminatorType> | undefined {
+  const result: Record<string, PortTerminatorType> = {};
+  let hasAny = false;
+
+  if (Array.isArray(input?.portTerminators)) {
+    for (const entry of input.portTerminators) {
+      if (entry && typeof entry.port === 'string' && typeof entry.terminator === 'string') {
+        result[entry.port] = normalizePortTerminatorValue(entry.terminator);
+        hasAny = true;
+      }
+    }
+  } else if (input?.portTerminators && typeof input.portTerminators === 'object') {
+    for (const [k, v] of Object.entries(input.portTerminators)) {
+      if (typeof v === 'string') {
+        result[k] = normalizePortTerminatorValue(v);
+        hasAny = true;
+      }
+    }
+  }
+
+  if (input?.portTerminatorsJson) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(input.portTerminatorsJson);
+    } catch (err) {
+      throw new EngineeringError({
+        category: 'InvalidTopology',
+        code: 'INVALID_PORT_TERMINATORS_JSON',
+        message: `portTerminatorsJson is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+        offendingIds: [],
+        suggestedFix: 'Pass a valid JSON object string, e.g. \'{"3":"exhaust_silencer","5":"exhaust_silencer"}\'.',
+      });
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new EngineeringError({
+        category: 'InvalidTopology',
+        code: 'INVALID_PORT_TERMINATORS_JSON',
+        message: 'portTerminatorsJson must decode to a JSON object.',
+        offendingIds: [],
+        suggestedFix: 'Pass a JSON object string mapping port names to exhaust_silencer/blind_plug/open.',
+      });
+    }
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === 'string') {
+        result[k] = normalizePortTerminatorValue(v);
+        hasAny = true;
+      }
+    }
+  }
+
+  if (input?.portTerminatorsList) {
+    for (const entry of input.portTerminatorsList) {
+      result[entry.port] = normalizePortTerminatorValue(entry.terminator);
+      hasAny = true;
+    }
+  }
+
+  return hasAny ? result : undefined;
+}
+
+export interface FlatComponentNodeInput {
+  id: string;
+  type: string;
+  label?: string;
+  sectionLabel?: string;
+  group?: string;
+  rotationDeg?: number;
+  mirror?: MirrorMode;
+  flipped?: number;
+  params?: Record<string, unknown>;
+  paramsJson?: string;
+  paramsList?: ParamEntryInput[];
+  portTerminators?: Record<string, unknown> | PortTerminatorEntryInput[];
+  portTerminatorsJson?: string;
+  portTerminatorsList?: PortTerminatorEntryInput[];
+  leftActuation?: ComponentNode['leftActuation'];
+  rightActuation?: ComponentNode['rightActuation'];
+  distanceRule?: ComponentNode['distanceRule'];
+}
+
 export interface FlatPatchOpInput {
   op:
     | 'add_component'
@@ -90,38 +191,60 @@ export interface FlatPatchOpInput {
     | 'connect'
     | 'disconnect'
     | 'set_distance_rule'
-    | 'set_label';
-  component?: {
-    id: string;
-    type: string;
-    label?: string;
-    rotationDeg?: number;
-    params?: Record<string, unknown>;
-    paramsJson?: string;
-    paramsList?: ParamEntryInput[];
-    leftActuation?: ComponentNode['leftActuation'];
-    rightActuation?: ComponentNode['rightActuation'];
-    distanceRule?: ComponentNode['distanceRule'];
-  };
+    | 'set_label'
+    | 'set_port_terminator'
+    | 'set_net'
+    | 'remove_net';
+  component?: FlatComponentNodeInput;
   id?: string;
   patch?: {
     label?: string;
+    sectionLabel?: string;
+    group?: string;
     rotationDeg?: number;
+    mirror?: MirrorMode;
+    flipped?: number;
     params?: Record<string, unknown>;
     paramsJson?: string;
     paramsList?: ParamEntryInput[];
+    portTerminators?: Record<string, unknown> | PortTerminatorEntryInput[];
+    portTerminatorsJson?: string;
+    portTerminatorsList?: PortTerminatorEntryInput[];
     leftActuation?: ComponentNode['leftActuation'];
     rightActuation?: ComponentNode['rightActuation'];
     distanceRule?: ComponentNode['distanceRule'];
   };
   removeConnectedEdges?: boolean;
-  from?: { componentId: string; port: string };
-  to?: { componentId: string; port: string };
+  from?: PortRef;
+  to?: PortRef;
   edgeId?: string;
   componentId?: string;
   markers?: ComponentNode['distanceRule'];
   label?: string;
   side?: 'component' | 'leftActuation' | 'rightActuation';
+  port?: string;
+  terminator?: PortTerminatorType | 'none';
+  net?: CircuitNet;
+  netId?: string;
+}
+
+function normalizeComponentInput(raw: FlatComponentNodeInput): ComponentNode {
+  const terminators = parsePortTerminatorsBag(raw);
+  return {
+    id: raw.id,
+    type: raw.type,
+    ...(raw.label !== undefined ? { label: raw.label } : {}),
+    ...(raw.sectionLabel !== undefined ? { sectionLabel: raw.sectionLabel } : {}),
+    ...(raw.group !== undefined ? { group: raw.group } : {}),
+    ...(raw.rotationDeg !== undefined ? { rotationDeg: raw.rotationDeg as 0 | 90 | 180 | 270 } : {}),
+    ...(raw.mirror !== undefined ? { mirror: raw.mirror } : {}),
+    ...(raw.flipped !== undefined ? { flipped: raw.flipped as FluidSimFlippedCode } : {}),
+    params: parseParamsBag(raw),
+    ...(terminators ? { portTerminators: terminators } : {}),
+    ...(raw.leftActuation !== undefined ? { leftActuation: raw.leftActuation } : {}),
+    ...(raw.rightActuation !== undefined ? { rightActuation: raw.rightActuation } : {}),
+    ...(raw.distanceRule !== undefined ? { distanceRule: raw.distanceRule } : {}),
+  };
 }
 
 function normalizePatchOperations(rawOps: readonly FlatPatchOpInput[]): CircuitPatchOp[] {
@@ -137,19 +260,9 @@ function normalizePatchOperations(rawOps: readonly FlatPatchOpInput[]): CircuitP
             suggestedFix: 'Include component: { id, type, label?, paramsJson? }.',
           });
         }
-        const rot = raw.component.rotationDeg;
         return {
           op: 'add_component',
-          component: {
-            id: raw.component.id,
-            type: raw.component.type,
-            label: raw.component.label,
-            ...(rot !== undefined ? { rotationDeg: rot as 0 | 90 | 180 | 270 } : {}),
-            params: parseParamsBag(raw.component),
-            leftActuation: raw.component.leftActuation,
-            rightActuation: raw.component.rightActuation,
-            distanceRule: raw.component.distanceRule,
-          },
+          component: normalizeComponentInput(raw.component),
         };
       }
       case 'update_component': {
@@ -159,7 +272,7 @@ function normalizePatchOperations(rawOps: readonly FlatPatchOpInput[]): CircuitP
             code: 'PATCH_MISSING_FIELD',
             message: `Patch op[${idx}] (update_component) requires "id" and "patch".`,
             offendingIds: raw.id ? [raw.id] : [],
-            suggestedFix: 'Pass id and patch: { label?, rotationDeg?, paramsJson?, leftActuation?, rightActuation?, distanceRule? }.',
+            suggestedFix: 'Pass id and patch: { label?, rotationDeg?, mirror?, sectionLabel?, group?, paramsJson?, portTerminatorsJson? }.',
           });
         }
         const mergedParams = parseParamsBag(raw.patch);
@@ -167,15 +280,21 @@ function normalizePatchOperations(rawOps: readonly FlatPatchOpInput[]): CircuitP
           raw.patch.params !== undefined ||
           raw.patch.paramsJson !== undefined ||
           raw.patch.paramsList !== undefined;
+        const terminators = parsePortTerminatorsBag(raw.patch);
         return {
           op: 'update_component',
           id: raw.id,
           patch: {
             ...(raw.patch.label !== undefined ? { label: raw.patch.label } : {}),
+            ...(raw.patch.sectionLabel !== undefined ? { sectionLabel: raw.patch.sectionLabel } : {}),
+            ...(raw.patch.group !== undefined ? { group: raw.patch.group } : {}),
             ...(raw.patch.rotationDeg !== undefined
               ? { rotationDeg: raw.patch.rotationDeg as 0 | 90 | 180 | 270 }
               : {}),
+            ...(raw.patch.mirror !== undefined ? { mirror: raw.patch.mirror } : {}),
+            ...(raw.patch.flipped !== undefined ? { flipped: raw.patch.flipped as FluidSimFlippedCode } : {}),
             ...(hasParams ? { params: mergedParams } : {}),
+            ...(terminators ? { portTerminators: terminators } : {}),
             ...(raw.patch.leftActuation !== undefined ? { leftActuation: raw.patch.leftActuation } : {}),
             ...(raw.patch.rightActuation !== undefined ? { rightActuation: raw.patch.rightActuation } : {}),
             ...(raw.patch.distanceRule !== undefined ? { distanceRule: raw.patch.distanceRule } : {}),
@@ -256,6 +375,53 @@ function normalizePatchOperations(rawOps: readonly FlatPatchOpInput[]): CircuitP
           side: raw.side,
         };
       }
+      case 'set_port_terminator': {
+        if (!raw.componentId || !raw.port || !raw.terminator) {
+          throw new EngineeringError({
+            category: 'InvalidTopology',
+            code: 'PATCH_MISSING_FIELD',
+            message: `Patch op[${idx}] (set_port_terminator) requires "componentId", "port", and "terminator".`,
+            offendingIds: raw.componentId ? [raw.componentId] : [],
+            suggestedFix: 'Pass componentId, port, and terminator ("exhaust_silencer" | "blind_plug" | "none").',
+          });
+        }
+        return {
+          op: 'set_port_terminator',
+          componentId: raw.componentId,
+          port: raw.port,
+          terminator: raw.terminator,
+        };
+      }
+      case 'set_net': {
+        if (!raw.net) {
+          throw new EngineeringError({
+            category: 'InvalidTopology',
+            code: 'PATCH_MISSING_FIELD',
+            message: `Patch op[${idx}] (set_net) requires a "net" object.`,
+            offendingIds: [],
+            suggestedFix: 'Pass net: { id, domain, endpoints: [{ componentId, port }, ...] }.',
+          });
+        }
+        return {
+          op: 'set_net',
+          net: raw.net,
+        };
+      }
+      case 'remove_net': {
+        if (!raw.netId) {
+          throw new EngineeringError({
+            category: 'InvalidTopology',
+            code: 'PATCH_MISSING_FIELD',
+            message: `Patch op[${idx}] (remove_net) requires "netId".`,
+            offendingIds: [],
+            suggestedFix: 'Pass netId of the net to remove.',
+          });
+        }
+        return {
+          op: 'remove_net',
+          netId: raw.netId,
+        };
+      }
     }
   });
 }
@@ -307,8 +473,8 @@ function buildTemplateDocument(
   }
 
   if (template === 'pneumatic_basic') {
-    // Terminating MANIFOLD_1.4 with a blind_plug keeps MANIFOLD_1.2 & .3 free for patching
-    // while guaranteeing the fresh template passes circuit_validate with 0 errors and 0 warnings.
+    // Terminating MANIFOLD_1.3 with a blind_plug keeps MANIFOLD_1.2 free for patching
+    // while keeping PTriconnection strictly 3-gate F9-compliant and 0 errors/warnings.
     return autoLayoutCircuit({
       schemaVersion: '1.0',
       metadata: baseMeta,
@@ -321,7 +487,7 @@ function buildTemplateDocument(
       connections: [
         { id: 'E1', from: { componentId: 'SRC_1', port: '1' }, to: { componentId: 'FRL_1', port: '1' }, domain: 'pneumatic' },
         { id: 'E2', from: { componentId: 'FRL_1', port: '2' }, to: { componentId: 'MANIFOLD_1', port: '1' }, domain: 'pneumatic' },
-        { id: 'E3', from: { componentId: 'MANIFOLD_1', port: '4' }, to: { componentId: 'PLUG_1', port: '1' }, domain: 'pneumatic' },
+        { id: 'E3', from: { componentId: 'MANIFOLD_1', port: '3' }, to: { componentId: 'PLUG_1', port: '1' }, domain: 'pneumatic' },
       ],
     });
   }
@@ -340,7 +506,7 @@ function buildTemplateDocument(
     connections: [
       { id: 'E1', from: { componentId: 'SRC_1', port: '1' }, to: { componentId: 'FRL_1', port: '1' }, domain: 'pneumatic' },
       { id: 'E2', from: { componentId: 'FRL_1', port: '2' }, to: { componentId: 'MANIFOLD_1', port: '1' }, domain: 'pneumatic' },
-      { id: 'E3', from: { componentId: 'MANIFOLD_1', port: '4' }, to: { componentId: 'PLUG_1', port: '1' }, domain: 'pneumatic' },
+      { id: 'E3', from: { componentId: 'MANIFOLD_1', port: '3' }, to: { componentId: 'PLUG_1', port: '1' }, domain: 'pneumatic' },
     ],
   });
 }
@@ -494,6 +660,87 @@ export function handleCircuitCreate(
       errorCount: saved.postcondition.validation.errorCount,
       warningCount: saved.postcondition.validation.warningCount,
     },
+  };
+}
+
+export function handleCircuitBuild(
+  ctx: McpToolContext,
+  args: {
+    path: string;
+    title: string;
+    sheetSize?: SheetSizePreset;
+    sheetDomain?: SheetDomain;
+    allowExternalElectricalSheet?: boolean;
+    components: FlatComponentNodeInput[];
+    connections?: Array<{ id?: string; from: PortRef; to: PortRef }>;
+    nets?: CircuitNet[];
+    autoLayout?: boolean;
+    overwrite?: boolean;
+  },
+) {
+  ctx.guard.ensureRootExists({ createIfMissing: true });
+  const abs = ctx.guard.resolveCircuitPath(args.path);
+  if (fs.existsSync(abs) && args.overwrite === false) {
+    throw new EngineeringError({
+      category: 'AccessDenied',
+      code: 'FILE_ALREADY_EXISTS',
+      message: `Circuit file "${args.path}" already exists and overwrite=false.`,
+      offendingIds: [args.path],
+      suggestedFix: 'Pass overwrite=true or choose a new filename.',
+    });
+  }
+
+  const baseDoc = buildTemplateDocument('blank', {
+    title: args.title,
+    sheetSize: args.sheetSize ?? 'DIN_A3_LANDSCAPE',
+    sheetDomain: args.sheetDomain,
+    allowExternalElectricalSheet: args.allowExternalElectricalSheet,
+  });
+
+  const ops: CircuitPatchOp[] = [];
+  for (const rawComp of args.components) {
+    ops.push({
+      op: 'add_component',
+      component: normalizeComponentInput(rawComp),
+    });
+  }
+  for (const conn of args.connections ?? []) {
+    ops.push({
+      op: 'connect',
+      ...(conn.id ? { id: conn.id } : {}),
+      from: conn.from,
+      to: conn.to,
+    });
+  }
+  for (const net of args.nets ?? []) {
+    ops.push({
+      op: 'set_net',
+      net,
+    });
+  }
+
+  const patched = applyCircuitPatch(baseDoc, ops);
+  const builtDoc =
+    args.autoLayout === false
+      ? patched.document
+      : autoLayoutCircuit(patched.document, { incremental: false });
+
+  const saved = saveCircuitWithPostcondition(ctx, args.path, builtDoc);
+  const svgPreview = renderCircuitToSvg(saved.postcondition.reparsedDocument);
+
+  return {
+    path: saved.relativePath,
+    title: builtDoc.metadata.title,
+    sheetWidthMm: builtDoc.metadata.sheetWidthMm,
+    sheetHeightMm: builtDoc.metadata.sheetHeightMm,
+    componentCount: saved.postcondition.reparsedDocument.components.length,
+    connectionCount: saved.postcondition.reparsedDocument.connections.length,
+    postconditionPassed: saved.postcondition.passed,
+    roundtripPassed: saved.postcondition.roundtripPassed,
+    f9SolverOk: saved.postcondition.f9SolverOk,
+    visualLayoutOk: saved.postcondition.visualLayoutOk,
+    layoutDiagnostics: svgPreview.diagnostics,
+    validation: saved.postcondition.validation,
   };
 }
 

@@ -179,8 +179,9 @@ export function createInitialPneumaticState(doc: CircuitDocument): PneumaticStat
         pressureBar: 0,
         gripped: false,
       };
-    } else if (c.type === 'pressure_switch_differential') {
-      const setP = typeof c.params.pressureBar === 'number' ? c.params.pressureBar : -0.45;
+    } else if (c.type === 'pressure_switch_differential' || c.type === 'pressure_switch_pew') {
+      const defaultSetP = c.type === 'pressure_switch_pew' ? 2.5 : -0.45;
+      const setP = typeof c.params.pressureBar === 'number' ? c.params.pressureBar : defaultSetP;
       pressureSwitches[c.id] = {
         id: c.id,
         label: c.label ?? c.id,
@@ -504,7 +505,13 @@ export function stepPneumaticSolver(input: PneumaticTickInput): PneumaticTickOut
           const cap = typeof c.params.setPressureBar === 'number' ? c.params.setPressureBar : 4.0;
           const pIn = readPos(c.id, '1');
           if (pIn > 0) drivePos(c.id, '2', Math.min(pIn, cap));
-        } else if (c.type === 'air_filter' || c.type === 'air_reservoir' || c.type === 'throttle_valve') {
+        } else if (
+          c.type === 'air_filter' ||
+          c.type === 'air_reservoir' ||
+          c.type === 'throttle_valve' ||
+          c.type === 'nozzle' ||
+          c.type === 'orifice'
+        ) {
           const p1 = readPos(c.id, '1');
           const p2 = readPos(c.id, '2');
           if (p1 > p2) drivePos(c.id, '2', p1);
@@ -521,14 +528,20 @@ export function stepPneumaticSolver(input: PneumaticTickInput): PneumaticTickOut
           if (p1 > relief) {
             drivePos(c.id, '2', p1 - relief);
           }
-        } else if (c.type === 'check_valve' || c.type === 'check_valve_spring') {
+        } else if (
+          c.type === 'check_valve' ||
+          c.type === 'check_valve_spring' ||
+          c.type === 'check_valve_pilot_open'
+        ) {
           const cracking =
             typeof c.params.crackingPressureBar === 'number'
               ? c.params.crackingPressureBar
-              : c.type === 'check_valve_spring'
+              : c.type === 'check_valve_spring' || c.type === 'check_valve_pilot_open'
                 ? 0.2
                 : 0.05;
-          const pilotOpen = c.type === 'check_valve_spring' && readPos(c.id, '12') >= PILOT_THRESHOLD_BAR;
+          const pilotOpen =
+            (c.type === 'check_valve_spring' || c.type === 'check_valve_pilot_open') &&
+            readPos(c.id, '12') >= PILOT_THRESHOLD_BAR;
           const p1 = readPos(c.id, '1');
           const p2 = readPos(c.id, '2');
           // Forward positive flow 1 -> 2
@@ -758,7 +771,7 @@ export function stepPneumaticSolver(input: PneumaticTickInput): PneumaticTickOut
         }
         continue;
       }
-      if (c.type === 'throttle_valve') {
+      if (c.type === 'throttle_valve' || c.type === 'nozzle' || c.type === 'orifice') {
         const r1 = find(pKey(c.id, '1'));
         const r2 = find(pKey(c.id, '2'));
         if (r1 !== targetRoot && r2 !== targetRoot) continue;
@@ -997,13 +1010,14 @@ export function stepPneumaticSolver(input: PneumaticTickInput): PneumaticTickOut
           detail: `Vacuum cup ${vs.label} ${grippedNow ? 'gripped workpiece' : 'released workpiece'} (${vs.pressureBar} bar)`,
         });
       }
-    } else if (c.type === 'pressure_switch_differential') {
+    } else if (c.type === 'pressure_switch_differential' || c.type === 'pressure_switch_pew') {
       const ps = state.pressureSwitches[c.id];
       if (!ps) continue;
-      const p1 = getPortP(c.id, 'P1') || getPortP(c.id, '1');
-      const p2 = getPortP(c.id, 'P2') || getPortP(c.id, '2');
+      const isSinglePort = c.type === 'pressure_switch_pew';
+      const p1 = isSinglePort ? getPortP(c.id, '1') : (getPortP(c.id, 'P1') || getPortP(c.id, '1'));
+      const p2 = isSinglePort ? 0 : (getPortP(c.id, 'P2') || getPortP(c.id, '2'));
       const diff = p1 - p2;
-      const setP = typeof c.params.pressureBar === 'number' ? c.params.pressureBar : -0.5;
+      const setP = typeof c.params.pressureBar === 'number' ? c.params.pressureBar : (isSinglePort ? 2.5 : -0.5);
       const trigMode =
         c.params.triggerMode === 'above' || c.params.triggerMode === 'below'
           ? c.params.triggerMode

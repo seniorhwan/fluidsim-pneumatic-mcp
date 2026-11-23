@@ -1,5 +1,6 @@
 import type { CircuitDocument, CircuitPatchOp, ComponentNode, ConnectionEdge } from '../contracts/circuit';
 import { getDefaultParams, getPortDefinition } from '../catalog/pneumatics45';
+import { flippedCodeToMirror, mirrorToFlippedCode } from '../codec/ctTransform';
 import { runWritePreflight } from './writePreflight';
 import { autoLayoutCircuit } from './layoutRouter';
 
@@ -24,6 +25,14 @@ function normalizeComponentNode(node: ComponentNode, explicitParams?: Record<str
     delete params.rotationDeg;
   }
 
+  let flipped = node.flipped;
+  let mirror = node.mirror;
+  if (mirror !== undefined && flipped === undefined) {
+    flipped = mirrorToFlippedCode(mirror);
+  } else if (flipped !== undefined && mirror === undefined) {
+    mirror = flippedCodeToMirror(flipped);
+  }
+
   if (node.type === 'valve_2_2' || node.type === 'valve_3_2') {
     if (explicitParams && typeof explicitParams.normallyOpen === 'boolean') {
       params.normallyOpen = explicitParams.normallyOpen;
@@ -41,6 +50,8 @@ function normalizeComponentNode(node: ComponentNode, explicitParams?: Record<str
   return {
     ...node,
     rotationDeg,
+    ...(mirror !== undefined ? { mirror } : {}),
+    ...(flipped !== undefined ? { flipped } : {}),
     layout: node.layout
       ? {
           ...node.layout,
@@ -98,11 +109,18 @@ export function applyCircuitPatch(
         const idx = working.components.findIndex((c) => c.id === op.id);
         if (idx >= 0) {
           const prev = working.components[idx];
+          const nextMirror = op.patch.mirror ?? (op.patch.flipped !== undefined ? flippedCodeToMirror(op.patch.flipped) : prev.mirror);
+          const nextFlipped = op.patch.flipped ?? (op.patch.mirror !== undefined ? mirrorToFlippedCode(op.patch.mirror) : prev.flipped);
           working.components[idx] = normalizeComponentNode(
             {
               ...prev,
               ...op.patch,
+              ...(nextMirror !== undefined ? { mirror: nextMirror } : {}),
+              ...(nextFlipped !== undefined ? { flipped: nextFlipped } : {}),
               params: { ...prev.params, ...(op.patch.params ?? {}) },
+              ...(op.patch.portTerminators
+                ? { portTerminators: { ...(prev.portTerminators ?? {}), ...op.patch.portTerminators } }
+                : {}),
             },
             op.patch.params,
           );
@@ -189,6 +207,44 @@ export function applyCircuitPatch(
             comp.label = op.label;
           }
           updatedComponents.push(op.componentId);
+        }
+        break;
+      }
+
+      case 'set_port_terminator': {
+        const comp = working.components.find((c) => c.id === op.componentId);
+        if (comp) {
+          const nextTerms = { ...(comp.portTerminators ?? {}) };
+          if (op.terminator === 'none') {
+            delete nextTerms[op.port];
+          } else {
+            nextTerms[op.port] = op.terminator;
+          }
+          comp.portTerminators = Object.keys(nextTerms).length > 0 ? nextTerms : undefined;
+          updatedComponents.push(op.componentId);
+        }
+        break;
+      }
+
+      case 'set_net': {
+        const existingNets = [...(working.nets ?? [])];
+        const idx = existingNets.findIndex((n) => n.id === op.net.id);
+        const normalizedNet = {
+          id: op.net.id,
+          ...(op.net.name ? { name: op.net.name } : {}),
+          domain: op.net.domain,
+          endpoints: op.net.endpoints.map((p) => ({ ...p })),
+          ...(op.net.terminators ? { terminators: [...op.net.terminators] } : {}),
+        };
+        if (idx >= 0) existingNets[idx] = normalizedNet;
+        else existingNets.push(normalizedNet);
+        working.nets = existingNets;
+        break;
+      }
+
+      case 'remove_net': {
+        if (working.nets) {
+          working.nets = working.nets.filter((n) => n.id !== op.netId);
         }
         break;
       }

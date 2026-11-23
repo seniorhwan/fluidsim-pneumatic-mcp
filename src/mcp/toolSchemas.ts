@@ -61,15 +61,35 @@ const sheetSizeEnumSchema = z.enum([
 
 const sheetDomainEnumSchema = z.enum(['electro-pneumatic', 'pneumatic-only']);
 
+const mirrorEnumSchema = z.enum(['none', 'horizontal', 'vertical', 'both']);
+const portTerminatorEnumSchema = z.enum(['exhaust_silencer', 'blind_plug', 'none']);
+
+const portTerminatorEntrySchema = z.object({
+  port: z.string().min(1).describe('Port name (e.g. "3", "5", "4").'),
+  terminator: z.enum(['exhaust_silencer', 'blind_plug']).describe('Inline FluidSIM port terminator: exhaust_silencer (EX3) or blind_plug (EX4).'),
+});
+
+const circuitNetSchema = z.object({
+  id: z.string().min(1).describe('Unique net ID (e.g. "NET_SUPPLY_6BAR", "NET_EXH_BUS", "NET_24V").'),
+  name: z.string().optional().describe('Optional display name for this net.'),
+  domain: z.enum(['pneumatic', 'electrical']).default('pneumatic').describe('Net domain ("pneumatic" or "electrical").'),
+  endpoints: z.array(portRefSchema).min(2).describe('All component ports joined on this net; lowered into clean 3-gate T-junction trees automatically.'),
+  terminators: z.array(z.enum(['exhaust_silencer', 'blind_plug'])).optional().describe('Optional net-level terminators.'),
+});
+
 /**
- * Uses looseObject so callers using plain `params: { ... }` remain compatible at runtime
- * while the published JSON Schema exposes only Gemini-compliant `paramsJson` / `paramsList`.
+ * Uses looseObject so callers using plain `params: { ... }` or `portTerminators: { ... }` remain compatible
+ * at runtime while the published JSON Schema exposes only Gemini-compliant fields.
  */
 const componentNodeSchema = z.looseObject({
   id: z.string().min(1).describe('Unique component ID.'),
   type: z.string().min(1).describe('Catalog componentType from catalog_search.'),
   label: z.string().optional().describe('Engineering label (A, K1, Y1, S1, a1, -1M1).'),
-  rotationDeg: z.number().int().optional().describe('Schematic orientation in degrees: 0, 90, 180, or 270.'),
+  sectionLabel: z.string().optional().describe('Optional schematic group/section heading above this branch (e.g. "Lifting Module", "Ejecting").'),
+  group: z.string().optional().describe('Optional logical branch/column grouping tag for schematic layout.'),
+  rotationDeg: z.number().int().optional().describe('Schematic orientation in degrees (CCW): 0, 90, 180, or 270.'),
+  mirror: mirrorEnumSchema.optional().describe('D4 mirror reflection: none, horizontal (X), vertical (Y), or both (180-deg flip).'),
+  flipped: z.number().int().min(0).max(3).optional().describe('FluidSIM 4.5 native FLIPPED bitmask (0=none, 1=H, 2=V, 3=both).'),
   paramsJson: z
     .string()
     .optional()
@@ -78,6 +98,14 @@ const componentNodeSchema = z.looseObject({
     .array(paramEntrySchema)
     .optional()
     .describe('Optional typed key/value parameter entries.'),
+  portTerminatorsJson: z
+    .string()
+    .optional()
+    .describe('Optional JSON object string of inline port terminators, e.g. \'{"3":"silencer","5":"silencer"}\'.'),
+  portTerminatorsList: z
+    .array(portTerminatorEntrySchema)
+    .optional()
+    .describe('Optional typed list of inline port terminators (silencer / plug).'),
   leftActuation: actuationSideSchema.optional(),
   rightActuation: actuationSideSchema.optional(),
   distanceRule: z.array(distanceMarkerSchema).optional(),
@@ -85,7 +113,11 @@ const componentNodeSchema = z.looseObject({
 
 const componentPatchFieldsSchema = z.looseObject({
   label: z.string().optional(),
-  rotationDeg: z.number().int().optional().describe('Schematic orientation in degrees: 0, 90, 180, or 270.'),
+  sectionLabel: z.string().optional(),
+  group: z.string().optional(),
+  rotationDeg: z.number().int().optional().describe('Schematic orientation in degrees (CCW): 0, 90, 180, or 270.'),
+  mirror: mirrorEnumSchema.optional().describe('D4 mirror reflection: none, horizontal, vertical, or both.'),
+  flipped: z.number().int().min(0).max(3).optional().describe('FluidSIM 4.5 native FLIPPED bitmask (0..3).'),
   paramsJson: z
     .string()
     .optional()
@@ -94,6 +126,14 @@ const componentPatchFieldsSchema = z.looseObject({
     .array(paramEntrySchema)
     .optional()
     .describe('Optional typed key/value parameter entries to merge.'),
+  portTerminatorsJson: z
+    .string()
+    .optional()
+    .describe('Optional JSON object string of inline port terminators to merge.'),
+  portTerminatorsList: z
+    .array(portTerminatorEntrySchema)
+    .optional()
+    .describe('Optional typed list of inline port terminators to merge.'),
   leftActuation: actuationSideSchema.optional(),
   rightActuation: actuationSideSchema.optional(),
   distanceRule: z.array(distanceMarkerSchema).optional(),
@@ -112,6 +152,9 @@ export const patchOpSchema = z.object({
       'disconnect',
       'set_distance_rule',
       'set_label',
+      'set_port_terminator',
+      'set_net',
+      'remove_net',
     ])
     .describe('Patch operation kind.'),
   component: componentNodeSchema.optional().describe('Required for op="add_component".'),
@@ -121,13 +164,17 @@ export const patchOpSchema = z.object({
   from: portRefSchema.optional().describe('Source port reference for op="connect" or op="disconnect".'),
   to: portRefSchema.optional().describe('Destination port reference for op="connect" or op="disconnect".'),
   edgeId: z.string().optional().describe('Edge ID for op="disconnect".'),
-  componentId: z.string().min(1).optional().describe('Target component ID for op="set_distance_rule" or op="set_label".'),
+  componentId: z.string().min(1).optional().describe('Target component ID for op="set_distance_rule", "set_label", or "set_port_terminator".'),
   markers: z.array(distanceMarkerSchema).optional().describe('Required for op="set_distance_rule".'),
   label: z.string().min(1).optional().describe('Required for op="set_label".'),
   side: z
     .enum(['component', 'leftActuation', 'rightActuation'])
     .optional()
     .describe('Optional side selector for op="set_label".'),
+  port: z.string().min(1).optional().describe('Target port name for op="set_port_terminator".'),
+  terminator: portTerminatorEnumSchema.optional().describe('Terminator kind for op="set_port_terminator" ("exhaust_silencer" | "blind_plug" | "none").'),
+  net: circuitNetSchema.optional().describe('Named net definition for op="set_net".'),
+  netId: z.string().min(1).optional().describe('Net ID for op="remove_net".'),
 });
 
 export const simInputEventSchema = z.object({
@@ -185,6 +232,14 @@ export const circuitQueryComponentsInputShape = {
   maxBytes: z.number().int().min(512).max(262144).optional(),
 };
 
+export const circuitRenderSvgInputShape = {
+  path: z.string().min(1).describe('Workspace-relative path to .fsim.json or .ct circuit file.'),
+  includeSvg: z.boolean().default(true).describe('Include raw SVG markup (set false for compact diagnostics-only response).'),
+  showGrid: z.boolean().default(false).describe('Overlay 10mm engineering grid lines on SVG preview.'),
+  scalePxPerMm: z.number().min(1).max(10).default(3).describe('SVG viewport scale in pixels per millimeter.'),
+  maxBytes: z.number().int().min(1024).max(262144).optional(),
+};
+
 export const projectCreateInputShape = {
   projectDir: z
     .string()
@@ -214,6 +269,31 @@ export const circuitCreateInputShape = {
   sheetDomain: sheetDomainEnumSchema.optional().describe('Set to "pneumatic-only" to allow valve solenoids wired on a separate electrical sheet.'),
   allowExternalElectricalSheet: z.boolean().optional().describe('If true, skips UNBOUND_VALVE_SOLENOID checks for multi-sheet pneumatic schematics.'),
   overwrite: z.boolean().default(false),
+};
+
+export const circuitBuildInputShape = {
+  path: z.string().min(1).describe('Target workspace-relative circuit file path (.ct or .fsim.json).'),
+  title: z.string().min(1).describe('Circuit schematic title.'),
+  sheetSize: sheetSizeEnumSchema.default('DIN_A3_LANDSCAPE').describe('Drawing sheet preset (DIN_A4_LANDSCAPE, DIN_A3_LANDSCAPE, etc.).'),
+  sheetDomain: sheetDomainEnumSchema.optional().describe('Set "pneumatic-only" if solenoids are wired on an external electrical sheet.'),
+  allowExternalElectricalSheet: z.boolean().optional(),
+  components: z.array(componentNodeSchema).min(1).describe('Complete list of components (supports mirror, rotationDeg, sectionLabel, group, portTerminators).'),
+  connections: z
+    .array(
+      z.object({
+        id: z.string().optional(),
+        from: portRefSchema,
+        to: portRefSchema,
+      }),
+    )
+    .optional()
+    .describe('Optional point-to-point connections.'),
+  nets: z
+    .array(circuitNetSchema)
+    .optional()
+    .describe('Optional named multi-port nets (automatically lowered into clean 3-gate T-junction trees).'),
+  autoLayout: z.boolean().default(true).describe('Automatically compute DIN ISO 1219 layout and channel-allocated orthogonal wires.'),
+  overwrite: z.boolean().default(true).describe('Overwrite existing file at path (default true).'),
 };
 
 export const circuitCloneInputShape = {

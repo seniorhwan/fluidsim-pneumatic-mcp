@@ -2,12 +2,20 @@ import type { McpToolContext } from './context';
 import { loadCircuitFromWorkspace } from './context';
 import { getCatalogComponent } from '../../catalog/pneumatics45';
 import { validateCircuitStatic } from '../../simulator/validator';
+import { collectCtVisualFindings } from '../../authoring/postconditionVerifier';
+import { renderCircuitToSvg } from '../../codec/ctSvgRenderer';
 import { assertPayloadBudget, paginateWithBudget } from '../../contracts/pagination';
 import type { ComponentCategory, Domain } from '../../contracts/catalog';
 
 export function handleCircuitInspect(ctx: McpToolContext, args: { path: string }) {
   const { document, relativePath } = loadCircuitFromWorkspace(ctx, args.path);
   const validation = validateCircuitStatic(document);
+  const rawBytes = ctx.guard.readFileBuffer(relativePath);
+  const visual = collectCtVisualFindings(
+    rawBytes,
+    document.metadata.sheetWidthMm,
+    document.metadata.sheetHeightMm,
+  );
 
   const countsByCategory: Record<string, number> = {};
   const actuators: Array<{
@@ -21,6 +29,11 @@ export function handleCircuitInspect(ctx: McpToolContext, args: { path: string }
     id: string;
     label?: string;
     type: string;
+    rotationDeg?: number;
+    mirror?: string;
+    sectionLabel?: string;
+    group?: string;
+    portTerminators?: Record<string, string>;
     leftActuation?: string;
     rightActuation?: string;
   }> = [];
@@ -57,6 +70,11 @@ export function handleCircuitInspect(ctx: McpToolContext, args: { path: string }
         id: c.id,
         label: c.label,
         type: c.type,
+        ...(c.rotationDeg !== undefined ? { rotationDeg: c.rotationDeg } : {}),
+        ...(c.mirror && c.mirror !== 'none' ? { mirror: c.mirror } : {}),
+        ...(c.sectionLabel ? { sectionLabel: c.sectionLabel } : {}),
+        ...(c.group ? { group: c.group } : {}),
+        ...(c.portTerminators ? { portTerminators: c.portTerminators } : {}),
         leftActuation: c.leftActuation
           ? `${c.leftActuation.type}${c.leftActuation.label ? `(${c.leftActuation.label})` : ''}`
           : undefined,
@@ -105,15 +123,18 @@ export function handleCircuitInspect(ctx: McpToolContext, args: { path: string }
     sheetHeightMm: document.metadata.sheetHeightMm,
     componentCount: document.components.length,
     connectionCount: document.connections.length,
+    ...(document.nets && document.nets.length > 0 ? { netCount: document.nets.length } : {}),
     countsByCategory,
     actuators,
     valves,
     detectedInputs,
     electricalRungCount: electricalLoadCount,
     validationSummary: {
-      valid: validation.valid,
-      errorCount: validation.errorCount,
-      warningCount: validation.warningCount,
+      valid: validation.valid && visual.f9SolverOk,
+      f9SolverOk: visual.f9SolverOk,
+      visualLayoutOk: visual.ok,
+      errorCount: validation.errorCount + visual.findings.filter((f) => f.severity === 'error').length,
+      warningCount: validation.warningCount + visual.findings.filter((f) => f.severity === 'warning').length,
     },
   };
 }
@@ -133,6 +154,16 @@ export function handleCircuitExportNetlist(
     for (const c of document.components) {
       const bits: string[] = [`${c.id}:${c.type}`];
       if (c.label) bits.push(`label=${c.label}`);
+      if (c.rotationDeg) bits.push(`rot=${c.rotationDeg}`);
+      if (c.mirror && c.mirror !== 'none') bits.push(`mirror=${c.mirror}`);
+      if (c.sectionLabel) bits.push(`section="${c.sectionLabel}"`);
+      if (c.group) bits.push(`group=${c.group}`);
+      if (c.portTerminators && Object.keys(c.portTerminators).length > 0) {
+        const terms = Object.entries(c.portTerminators)
+          .map(([p, t]) => `${p}:${t}`)
+          .join(',');
+        bits.push(`terms=[${terms}]`);
+      }
       if (c.leftActuation) {
         bits.push(`L=${c.leftActuation.type}${c.leftActuation.label ? `(${c.leftActuation.label})` : ''}`);
       }
@@ -147,6 +178,12 @@ export function handleCircuitExportNetlist(
     lines.push('CONNECTIONS:');
     for (const e of document.connections) {
       lines.push(`  ${e.id}[${e.domain[0].toUpperCase()}]: ${e.from.componentId}.${e.from.port} -- ${e.to.componentId}.${e.to.port}`);
+    }
+    if (document.nets && document.nets.length > 0) {
+      lines.push('NETS:');
+      for (const n of document.nets) {
+        lines.push(`  ${n.id}${n.name ? `(${n.name})` : ''}: ${n.endpoints.map((p) => `${p.componentId}.${p.port}`).join(' -- ')}`);
+      }
     }
     const payload = {
       path: relativePath,
@@ -164,6 +201,13 @@ export function handleCircuitExportNetlist(
       id: c.id,
       type: c.type,
       ...(c.label ? { label: c.label } : {}),
+      ...(c.rotationDeg !== undefined ? { rotationDeg: c.rotationDeg } : {}),
+      ...(c.mirror && c.mirror !== 'none' ? { mirror: c.mirror } : {}),
+      ...(c.flipped !== undefined ? { flipped: c.flipped } : {}),
+      ...(c.sectionLabel ? { sectionLabel: c.sectionLabel } : {}),
+      ...(c.group ? { group: c.group } : {}),
+      ...(c.portTerminators ? { portTerminators: c.portTerminators } : {}),
+      ...(c.layout ? { layout: c.layout } : {}),
       params: c.params,
       ...(c.leftActuation ? { leftActuation: c.leftActuation } : {}),
       ...(c.rightActuation ? { rightActuation: c.rightActuation } : {}),
@@ -175,6 +219,7 @@ export function handleCircuitExportNetlist(
       from: `${e.from.componentId}.${e.from.port}`,
       to: `${e.to.componentId}.${e.to.port}`,
     })),
+    ...(document.nets && document.nets.length > 0 ? { nets: document.nets } : {}),
   };
   assertPayloadBudget(payload, budget, 'circuit_export_netlist');
   return payload;
@@ -364,6 +409,13 @@ export function handleCircuitQueryComponents(
         id: c.id,
         type: c.type,
         ...(c.label ? { label: c.label } : {}),
+        ...(c.rotationDeg !== undefined ? { rotationDeg: c.rotationDeg } : {}),
+        ...(c.mirror && c.mirror !== 'none' ? { mirror: c.mirror } : {}),
+        ...(c.flipped !== undefined ? { flipped: c.flipped } : {}),
+        ...(c.sectionLabel ? { sectionLabel: c.sectionLabel } : {}),
+        ...(c.group ? { group: c.group } : {}),
+        ...(c.portTerminators ? { portTerminators: c.portTerminators } : {}),
+        ...(c.layout ? { layout: c.layout } : {}),
         params: c.params,
         ...(c.leftActuation ? { leftActuation: c.leftActuation } : {}),
         ...(c.rightActuation ? { rightActuation: c.rightActuation } : {}),
@@ -383,4 +435,44 @@ export function handleCircuitQueryComponents(
     components: paged.items,
     page: paged.page,
   };
+}
+
+export function handleCircuitRenderSvg(
+  ctx: McpToolContext,
+  args: {
+    path: string;
+    includeSvg?: boolean;
+    showGrid?: boolean;
+    scalePxPerMm?: number;
+    maxBytes?: number;
+  },
+) {
+  const { document, relativePath } = loadCircuitFromWorkspace(ctx, args.path);
+  const rawBytes = ctx.guard.readFileBuffer(relativePath);
+  const ctVisual = collectCtVisualFindings(
+    rawBytes,
+    document.metadata.sheetWidthMm,
+    document.metadata.sheetHeightMm,
+  );
+  const rendered = renderCircuitToSvg(document, {
+    scalePxPerMm: args.scalePxPerMm ?? 3,
+    showGrid: args.showGrid ?? false,
+  });
+
+  const includeSvg = args.includeSvg !== false;
+  const payload = {
+    path: relativePath,
+    widthMm: rendered.widthMm,
+    heightMm: rendered.heightMm,
+    diagnostics: {
+      ...rendered.diagnostics,
+      f9SolverOk: ctVisual.f9SolverOk,
+      ctVisualOk: ctVisual.ok,
+    },
+    ...(includeSvg ? { svg: rendered.svg } : {}),
+  };
+
+  const budget = Math.min(Math.max(ctx.maxPayloadBytes, 131_072), args.maxBytes ?? 131_072);
+  assertPayloadBudget(payload, budget, 'circuit_render_svg');
+  return payload;
 }

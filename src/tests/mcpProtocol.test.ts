@@ -62,10 +62,10 @@ test('end-to-end stdio MCP server exercises full autonomous agent loop, lifecycl
   try {
     await client.connect(transport);
 
-    // 1. Verify all 18 MCP tools are registered AND 100% Gemini/OpenAPI 3.0 schema compliant
+    // 1. Verify all 20 MCP tools are registered AND 100% Gemini/OpenAPI 3.0 schema compliant
     const listed = await client.listTools();
     const toolNames = new Set(listed.tools.map((t) => t.name));
-    assert.equal(toolNames.size, 18);
+    assert.equal(toolNames.size, 20);
     for (const expected of [
       'workspace_status',
       'catalog_search',
@@ -74,8 +74,10 @@ test('end-to-end stdio MCP server exercises full autonomous agent loop, lifecycl
       'circuit_export_netlist',
       'circuit_get_label_map',
       'circuit_query_components',
+      'circuit_render_svg',
       'project_create',
       'circuit_create',
+      'circuit_build',
       'circuit_clone',
       'circuit_rename',
       'circuit_delete',
@@ -429,7 +431,7 @@ test('Streamable HTTP transport serves /health and full MCP sessions on /mcp', a
     await client.connect(transport);
 
     const listed = await client.listTools();
-    assert.equal(listed.tools.length, 18);
+    assert.equal(listed.tools.length, 20);
     for (const tool of listed.tools) {
       assertGeminiCompliantSchema(tool.name, tool.inputSchema);
     }
@@ -588,6 +590,58 @@ test('Phase 4 & H3 hardening: single-acting K_HOLD latch across dwell, dryRun pr
     assert.equal(ceilingRes.ok, true);
     const pageMeta = ceilingRes.data?.page as { payloadBytes: number };
     assert.ok(pageMeta.payloadBytes <= 24000, `Payload exceeded server ceiling: ${pageMeta.payloadBytes}`);
+    // 6. v2 ergonomic 1-call circuit_build + circuit_render_svg over stdio
+    const builtRes = await callJsonTool(client, 'circuit_build', {
+      path: 'v2_build_demo.ct',
+      title: 'v2 One-Call Demo',
+      sheetSize: 'DIN_A4_LANDSCAPE',
+      sheetDomain: 'pneumatic-only',
+      allowExternalElectricalSheet: true,
+      components: [
+        { id: 'SRC', type: 'air_source', label: '0Z1', paramsJson: '{"pressureBar":6}' },
+        {
+          id: 'V1',
+          type: 'valve_5_2',
+          label: '1V1',
+          leftActuation: { type: 'solenoid', label: 'Y1', manualOverride: true, internalPilot: true },
+          rightActuation: { type: 'spring' },
+          portTerminators: [
+            { port: '3', terminator: 'exhaust_silencer' },
+            { port: '5', terminator: 'exhaust_silencer' },
+          ],
+          sectionLabel: 'Actuator 1A',
+        },
+        {
+          id: 'C1',
+          type: 'cylinder_double_acting',
+          label: '1A1',
+          paramsJson: '{"strokeMm":100}',
+          distanceRule: [
+            { label: '1B1', positionMm: 0 },
+            { label: '1B2', positionMm: 100 },
+          ],
+        },
+      ],
+      nets: [
+        { id: 'NET_SUP', domain: 'pneumatic', endpoints: [{ componentId: 'SRC', port: '1' }, { componentId: 'V1', port: '1' }] },
+        { id: 'NET_EXT', domain: 'pneumatic', endpoints: [{ componentId: 'V1', port: '4' }, { componentId: 'C1', port: 'A' }] },
+        { id: 'NET_RET', domain: 'pneumatic', endpoints: [{ componentId: 'V1', port: '2' }, { componentId: 'C1', port: 'B' }] },
+      ],
+    });
+    assert.equal(builtRes.ok, true, JSON.stringify(builtRes));
+    assert.equal(builtRes.data?.postconditionPassed, true, JSON.stringify(builtRes));
+
+    const svgRes = await callJsonTool(client, 'circuit_render_svg', {
+      path: 'v2_build_demo.ct',
+      includeSvg: true,
+    });
+    assert.equal(svgRes.ok, true, JSON.stringify(svgRes));
+    assert.equal(typeof svgRes.data?.svg, 'string');
+    assert.ok((svgRes.data?.svg as string).includes('<svg'));
+    const svgDiag = svgRes.data?.diagnostics as { componentOverlaps: number; outOfBoundsCount: number; f9SolverOk: boolean };
+    assert.equal(svgDiag.componentOverlaps, 0);
+    assert.equal(svgDiag.outOfBoundsCount, 0);
+    assert.equal(svgDiag.f9SolverOk, true);
   } finally {
     await client.close();
     fs.rmSync(workspace, { recursive: true, force: true });

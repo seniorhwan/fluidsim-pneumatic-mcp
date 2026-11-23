@@ -73,6 +73,14 @@ export const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = {
     defaultMaxPayloadBytes: 32_768,
     description: 'Paginated filtered component lookup with full parameters and connected neighbors.',
   },
+  circuit_render_svg: {
+    name: 'circuit_render_svg',
+    group: 'read',
+    mutatesDisk: false,
+    requiresAuthoring: false,
+    defaultMaxPayloadBytes: 131_072,
+    description: 'Render headless ISO 1219 SVG schematic preview and quantitative visual/F9 layout diagnostics.',
+  },
 
   // Group C: Headless Authoring & Refactoring
   project_create: {
@@ -90,6 +98,14 @@ export const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = {
     requiresAuthoring: true,
     defaultMaxPayloadBytes: 16_384,
     description: 'Create a new circuit file from a standard template inside the workspace jail.',
+  },
+  circuit_build: {
+    name: 'circuit_build',
+    group: 'author',
+    mutatesDisk: true,
+    requiresAuthoring: true,
+    defaultMaxPayloadBytes: 32_768,
+    description: 'One-call Semantic IR v2 circuit builder with named nets, inline port terminators, D4 orientation, auto-layout, F9 verification, and SVG quality score.',
   },
   circuit_clone: {
     name: 'circuit_clone',

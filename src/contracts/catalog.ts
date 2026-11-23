@@ -6,6 +6,8 @@ export type Domain = 'pneumatic' | 'electrical' | 'hybrid';
 
 export type PortDomain = 'pneumatic' | 'electrical';
 
+export type PortNormal = 'N' | 'S' | 'E' | 'W';
+
 export type PortRole =
   | 'supply'
   | 'working'
@@ -52,8 +54,10 @@ export interface PortDefinition {
   domain: PortDomain;
   role: PortRole;
   required: boolean;
-  /** Default relative port anchor offset (mm in FluidSIM grid coordinates) for auto-layout routing. */
+  /** Default relative port anchor offset (mm in FluidSIM grid coordinates) derived from the canonical prototype. */
   offset: { x: number; y: number };
+  /** Outward port exit normal at canonical rot=0, mirror="none" orientation. */
+  normal?: PortNormal;
 }
 
 export interface ParameterSpec {
@@ -70,9 +74,9 @@ export interface ParameterSpec {
 export interface CatalogComponentDef {
   /** Canonical semantic type name used by agents. */
   type: string;
-  /** FluidSIM 4.5 internal symbol/object identifier. Marked verified once confirmed against golden .ct fixtures or sym/ audit. */
+  /** FluidSIM 4.5 internal symbol/object identifier from official sym/ prototypes. */
   fluidsim45Id: string;
-  /** True only when empirically verified against real FluidSIM 4.5 .ct files. */
+  /** True when empirically verified against real FluidSIM 4.5 .ct files or sym/ prototypes. */
   fluidsim45IdVerified: boolean;
   displayName: string;
   category: ComponentCategory;
@@ -81,7 +85,7 @@ export interface CatalogComponentDef {
   keywords: readonly string[];
   ports: readonly PortDefinition[];
   parameters: readonly ParameterSpec[];
-  /** Default bounding size (mm) used by the ISO 1219 auto-layout router. */
+  /** Default bounding size (mm) derived directly from the FluidSIM 4.5 prototype registry. */
   defaultSize: { width: number; height: number };
   /** Preferred vertical ISO 1219 layout layer (0=top actuators ... 4=bottom air supply, 10+=ladder). */
   layoutLayer: number;

@@ -15,6 +15,7 @@ import {
   catalogSearchInputShape,
   circuitApplyPatchInputShape,
   circuitAutoLayoutInputShape,
+  circuitBuildInputShape,
   circuitCloneInputShape,
   circuitCreateInputShape,
   circuitDeleteInputShape,
@@ -24,6 +25,7 @@ import {
   circuitInspectInputShape,
   circuitQueryComponentsInputShape,
   circuitRenameInputShape,
+  circuitRenderSvgInputShape,
   circuitSimulateInputShape,
   circuitValidateInputShape,
   circuitVerifySequenceInputShape,
@@ -41,10 +43,12 @@ import {
   handleCircuitGetLabelMap,
   handleCircuitInspect,
   handleCircuitQueryComponents,
+  handleCircuitRenderSvg,
 } from './tools/readTools';
 import {
   handleCircuitApplyPatch,
   handleCircuitAutoLayout,
+  handleCircuitBuild,
   handleCircuitClone,
   handleCircuitCreate,
   handleCircuitDelete,
@@ -59,7 +63,7 @@ import {
 } from './tools/verifyTools';
 
 export const SERVER_NAME = 'fluidsim-pneumatics-mcp';
-export const SERVER_VERSION = '0.2.0';
+export const SERVER_VERSION = '0.3.0';
 
 export interface CreateServerOptions {
   workspaceRoot: string;
@@ -253,6 +257,13 @@ export function createFluidsimMcpServer(options: CreateServerOptions): {
     async (args) => executeTool('circuit_query_components', args, handleCircuitQueryComponents),
   );
 
+  server.tool(
+    'circuit_render_svg',
+    TOOL_POLICIES.circuit_render_svg.description,
+    circuitRenderSvgInputShape,
+    async (args) => executeTool('circuit_render_svg', args, handleCircuitRenderSvg),
+  );
+
   // Group C: Headless Authoring & Project Lifecycle
   server.tool(
     'project_create',
@@ -266,6 +277,13 @@ export function createFluidsimMcpServer(options: CreateServerOptions): {
     TOOL_POLICIES.circuit_create.description,
     circuitCreateInputShape,
     async (args) => executeTool('circuit_create', args, handleCircuitCreate),
+  );
+
+  server.tool(
+    'circuit_build',
+    TOOL_POLICIES.circuit_build.description,
+    circuitBuildInputShape,
+    async (args) => executeTool('circuit_build', args, handleCircuitBuild),
   );
 
   server.tool(

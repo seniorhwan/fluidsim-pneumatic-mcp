@@ -84,6 +84,67 @@ function validateRotationDeg(opIndex: number, compId: string, rot: unknown): voi
   }
 }
 
+function validateMirrorAndFlipped(
+  opIndex: number,
+  compId: string,
+  mirror: unknown,
+  flipped: unknown,
+): void {
+  if (mirror !== undefined && mirror !== 'none' && mirror !== 'horizontal' && mirror !== 'vertical' && mirror !== 'both') {
+    throw new EngineeringError({
+      category: 'InvalidTopology',
+      code: 'PREFLIGHT_INVALID_MIRROR',
+      message: `Patch op[${opIndex}] sets invalid mirror mode ${JSON.stringify(mirror)} on "${compId}".`,
+      offendingIds: [compId],
+      suggestedFix: 'Use mirror: "none" | "horizontal" | "vertical" | "both".',
+    });
+  }
+  if (flipped !== undefined && flipped !== 0 && flipped !== 1 && flipped !== 2 && flipped !== 3) {
+    throw new EngineeringError({
+      category: 'InvalidTopology',
+      code: 'PREFLIGHT_INVALID_FLIPPED',
+      message: `Patch op[${opIndex}] sets invalid flipped code ${JSON.stringify(flipped)} on "${compId}".`,
+      offendingIds: [compId],
+      suggestedFix: 'Use flipped: 0 | 1 | 2 | 3.',
+    });
+  }
+}
+
+function validatePortTerminators(
+  opIndex: number,
+  compId: string,
+  compType: string,
+  terminators?: Record<string, string>,
+): void {
+  if (!terminators) return;
+  for (const [portName, termType] of Object.entries(terminators)) {
+    const portDef = getPortDefinition(compType, portName);
+    if (!portDef) {
+      const validPorts = getCatalogComponent(compType)?.ports.map((p) => p.name).join(', ') ?? '';
+      throw new EngineeringError({
+        category: 'InvalidTopology',
+        code: 'PREFLIGHT_INVALID_PORT',
+        message: `Patch op[${opIndex}] sets portTerminator on invalid port "${portName}" of ${compId} (${compType}).`,
+        offendingIds: [compId],
+        suggestedFix: `Use one of the valid ports for ${compType}: [${validPorts}].`,
+      });
+    }
+    if (
+      termType !== 'exhaust_silencer' &&
+      termType !== 'blind_plug' &&
+      termType !== 'none'
+    ) {
+      throw new EngineeringError({
+        category: 'InvalidTopology',
+        code: 'PREFLIGHT_INVALID_TERMINATOR',
+        message: `Patch op[${opIndex}] sets invalid port terminator "${termType}" on ${compId}.${portName}.`,
+        offendingIds: [compId],
+        suggestedFix: 'Use terminator "exhaust_silencer", "blind_plug", or "none".',
+      });
+    }
+  }
+}
+
 function getDistanceRuleMaxSpan(
   type: ComponentNode['type'],
   params?: Record<string, number | string | boolean>,
@@ -185,6 +246,8 @@ export function runWritePreflight(doc: CircuitDocument, ops: readonly CircuitPat
           });
         }
         validateRotationDeg(i, comp.id, comp.rotationDeg ?? comp.params?.rotationDeg ?? comp.layout?.rotationDeg);
+        validateMirrorAndFlipped(i, comp.id, comp.mirror, comp.flipped);
+        validatePortTerminators(i, comp.id, comp.type, comp.portTerminators);
         if (comp.params) {
           validateComponentParams(i, comp.id, def, comp.params);
         }
@@ -226,6 +289,8 @@ export function runWritePreflight(doc: CircuitDocument, ops: readonly CircuitPat
           });
         }
         validateRotationDeg(i, op.id, op.patch.rotationDeg ?? op.patch.params?.rotationDeg);
+        validateMirrorAndFlipped(i, op.id, op.patch.mirror, op.patch.flipped);
+        validatePortTerminators(i, op.id, existing.type, op.patch.portTerminators);
         const def = getCatalogComponent(existing.type);
         if (def) {
           if (op.patch.params) {
@@ -259,6 +324,9 @@ export function runWritePreflight(doc: CircuitDocument, ops: readonly CircuitPat
           ...existing,
           ...op.patch,
           params: { ...existing.params, ...(op.patch.params ?? {}) },
+          ...(op.patch.portTerminators
+            ? { portTerminators: { ...(existing.portTerminators ?? {}), ...op.patch.portTerminators } }
+            : {}),
         });
         break;
       }
@@ -453,6 +521,90 @@ export function runWritePreflight(doc: CircuitDocument, ops: readonly CircuitPat
               suggestedFix: 'Use side="component" for non-valve components, or target a directional valve.',
             });
           }
+        }
+        break;
+      }
+
+      case 'set_port_terminator': {
+        const comp = simComps.get(op.componentId);
+        if (!comp) {
+          throw new EngineeringError({
+            category: 'InvalidTopology',
+            code: 'PREFLIGHT_COMPONENT_NOT_FOUND',
+            message: `Patch op[${i}] (set_port_terminator) targets missing component "${op.componentId}".`,
+            offendingIds: [op.componentId],
+            suggestedFix: 'Ensure the target component exists before setting a port terminator.',
+          });
+        }
+        validatePortTerminators(i, op.componentId, comp.type, { [op.port]: op.terminator });
+        break;
+      }
+
+      case 'set_net': {
+        const net = op.net;
+        if (!net.id || net.id.trim().length === 0) {
+          throw new EngineeringError({
+            category: 'InvalidTopology',
+            code: 'PREFLIGHT_EMPTY_NET_NAME',
+            message: `Patch op[${i}] (set_net) has an empty net id.`,
+            offendingIds: [],
+            suggestedFix: 'Provide a non-empty net id such as "NET_SUPPLY_6BAR" or "NET_EXH_1".',
+          });
+        }
+        if (!Array.isArray(net.endpoints) || net.endpoints.length < 2) {
+          throw new EngineeringError({
+            category: 'InvalidTopology',
+            code: 'PREFLIGHT_INVALID_NET_PORTS',
+            message: `Patch op[${i}] (set_net) "${net.id}" requires at least 2 endpoints.`,
+            offendingIds: [net.id],
+            suggestedFix: 'Provide at least 2 PortRefs in net.endpoints.',
+          });
+        }
+        let expectedDomain: 'pneumatic' | 'electrical' | undefined = net.domain;
+        for (const ref of net.endpoints) {
+          const comp = simComps.get(ref.componentId);
+          if (!comp) {
+            throw new EngineeringError({
+              category: 'InvalidTopology',
+              code: 'PREFLIGHT_CONNECT_MISSING_COMPONENT',
+              message: `Patch op[${i}] (set_net) "${net.id}" references missing component "${ref.componentId}".`,
+              offendingIds: [ref.componentId],
+              suggestedFix: 'Add all referenced components before declaring the net.',
+            });
+          }
+          const portDef = getPortDefinition(comp.type, ref.port);
+          if (!portDef) {
+            throw new EngineeringError({
+              category: 'InvalidTopology',
+              code: 'PREFLIGHT_INVALID_PORT',
+              message: `Patch op[${i}] (set_net) "${net.id}" references invalid port "${ref.port}" on ${comp.id} (${comp.type}).`,
+              offendingIds: [comp.id],
+              suggestedFix: 'Verify valid port names via catalog_search.',
+            });
+          }
+          if (!expectedDomain) expectedDomain = portDef.domain;
+          else if (portDef.domain !== expectedDomain) {
+            throw new EngineeringError({
+              category: 'InvalidTopology',
+              code: 'PREFLIGHT_DOMAIN_MISMATCH',
+              message: `Patch op[${i}] (set_net) "${net.id}" mixes pneumatic and electrical ports (${comp.id}.${ref.port}).`,
+              offendingIds: [comp.id],
+              suggestedFix: 'Keep each net strictly pneumatic or strictly electrical.',
+            });
+          }
+        }
+        break;
+      }
+
+      case 'remove_net': {
+        if (!op.netId || op.netId.trim().length === 0) {
+          throw new EngineeringError({
+            category: 'InvalidTopology',
+            code: 'PREFLIGHT_EMPTY_NET_NAME',
+            message: `Patch op[${i}] (remove_net) requires a non-empty netId.`,
+            offendingIds: [],
+            suggestedFix: 'Pass netId of the net to remove.',
+          });
         }
         break;
       }

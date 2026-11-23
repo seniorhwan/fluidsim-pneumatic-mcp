@@ -1,4 +1,15 @@
+import type { CircuitDocument, ComponentNode, Point2D } from '../contracts/circuit';
+import type { PortNormal } from '../contracts/catalog';
 import { parseCtBodyAst } from './ctTextCodec';
+import { getFluidSim45Prototype } from './prototypes/fluidsim45Prototypes';
+import {
+  mirrorToFlippedCode,
+  normalToUnitVector,
+  normalizeRotationDeg,
+  transformBox,
+  transformNormal,
+  transformPoint,
+} from './ctTransform';
 
 export interface RawPoint {
   x: number;
@@ -21,6 +32,8 @@ export interface CtRoutingPort {
   cx: number;
   cy: number;
   hidden: boolean;
+  /** Optional outward exit normal ('N'|'S'|'E'|'W') for clean port stub escape. */
+  exitNormal?: PortNormal;
 }
 
 export interface CtRoutingEdge {
@@ -28,6 +41,8 @@ export interface CtRoutingEdge {
   fromPortId: number;
   toPortId: number;
   isManifoldBridge?: boolean;
+  /** Optional net identifier for grouping Steiner trunks / channel tracks. */
+  netId?: string;
 }
 
 export interface CtSheetBounds {
@@ -124,6 +139,41 @@ export function simplifyOrthogonalPath(rawPts: readonly RawPoint[]): RawPoint[] 
   return merged;
 }
 
+/**
+ * Left-edge channel interval packing (classic VLSI horizontal/vertical channel router).
+ * Assigns non-overlapping parallel track indices to intervals [start, end] so parallel
+ * bus runs never superimpose.
+ */
+export function allocateChannelTracks(
+  intervals: ReadonlyArray<{ id: string; start: number; end: number }>,
+  minGap = 0,
+): Map<string, number> {
+  const sorted = intervals
+    .map((iv) => ({ id: iv.id, lo: Math.min(iv.start, iv.end), hi: Math.max(iv.start, iv.end) }))
+    .sort((a, b) => a.lo - b.lo || a.hi - b.hi || a.id.localeCompare(b.id));
+
+  const trackEnd: number[] = [];
+  const assignment = new Map<string, number>();
+
+  for (const iv of sorted) {
+    let placedTrack = -1;
+    for (let t = 0; t < trackEnd.length; t++) {
+      if (trackEnd[t] + minGap <= iv.lo) {
+        placedTrack = t;
+        trackEnd[t] = iv.hi;
+        break;
+      }
+    }
+    if (placedTrack < 0) {
+      placedTrack = trackEnd.length;
+      trackEnd.push(iv.hi);
+    }
+    assignment.set(iv.id, placedTrack);
+  }
+
+  return assignment;
+}
+
 class MinHeap<T> {
   private readonly items: Array<{ key: number; val: T }> = [];
 
@@ -178,19 +228,23 @@ function buildTrackCoords(
   const mandatorySorted = Array.from(new Set(mandatory)).sort((a, b) => a - b);
   const tracks: number[] = [...mandatorySorted];
   const allCandidates = [...candidates];
-  for (let v = minBound; v <= maxBound; v += 15360) {
+  for (let v = minBound; v <= maxBound; v += 24576) {
     allCandidates.push(v);
   }
   allCandidates.sort((a, b) => a - b);
   for (const c of allCandidates) {
     if (c < minBound || c > maxBound) continue;
-    if (tracks.some((t) => Math.abs(t - c) < 3072)) continue;
+    if (tracks.some((t) => Math.abs(t - c) < 5600)) continue;
     tracks.push(c);
   }
   tracks.sort((a, b) => a - b);
   return tracks;
 }
 
+/**
+ * Unified Channel-Allocated + Port-Normal-Aware Orthogonal Router.
+ * Used identically by `.ct` emission, `layoutRouter.ts`, and SVG rendering.
+ */
 export function routeCtConnections(input: {
   bounds: CtSheetBounds;
   obstacles: readonly CtRoutingObstacle[];
@@ -205,15 +259,45 @@ export function routeCtConnections(input: {
   const candidateX: number[] = [];
   const candidateY: number[] = [];
 
+  // Pre-allocate horizontal channel tracks for non-aligned edges so parallel corridors spread cleanly
+  const horizIntervals: Array<{ id: string; start: number; end: number }> = [];
+  for (const e of edges) {
+    if (e.isManifoldBridge) continue;
+    const pA = ports.get(e.fromPortId);
+    const pB = ports.get(e.toPortId);
+    if (!pA || !pB) continue;
+    if (Math.abs(pA.cx - pB.cx) > 1024 && Math.abs(pA.cy - pB.cy) > 1024) {
+      horizIntervals.push({ id: e.key, start: pA.cx, end: pB.cx });
+    }
+  }
+  const channelTracks = allocateChannelTracks(horizIntervals, 4096);
+
+  const STUB_RAW = 8192;
   for (const p of ports.values()) {
     mandatoryX.push(p.cx);
     mandatoryY.push(p.cy);
-    candidateX.push(p.cx - 9216, p.cx + 9216);
-    candidateY.push(p.cy - 9216, p.cy + 9216);
+    if (p.exitNormal) {
+      const v = normalToUnitVector(p.exitNormal);
+      if (v.dx !== 0) candidateX.push(p.cx + v.dx * STUB_RAW);
+      if (v.dy !== 0) candidateY.push(p.cy + v.dy * STUB_RAW);
+    }
+    candidateX.push(p.cx - 8192, p.cx + 8192);
+    candidateY.push(p.cy - 8192, p.cy + 8192);
   }
   for (const obs of obstacles) {
-    candidateX.push(obs.x1 - 9216, obs.x2 + 9216);
-    candidateY.push(obs.y1 - 9216, obs.y2 + 9216);
+    candidateX.push(obs.x1 - 8192, obs.x2 + 8192, obs.x1 - 16384, obs.x2 + 16384);
+    candidateY.push(obs.y1 - 8192, obs.y2 + 8192, obs.y1 - 16384, obs.y2 + 16384);
+  }
+
+  // Add channel-allocated mid-corridor Y tracks for multi-wire horizontal buses
+  for (const e of edges) {
+    const pA = ports.get(e.fromPortId);
+    const pB = ports.get(e.toPortId);
+    if (!pA || !pB) continue;
+    const trackIdx = channelTracks.get(e.key) ?? 0;
+    const midY = Math.round((pA.cy + pB.cy) / 2);
+    const offset = ((trackIdx % 5) - 2) * 5120;
+    candidateY.push(midY + offset);
   }
 
   const xs = buildTrackCoords(mandatoryX, candidateX, bounds.minX, bounds.maxX);
@@ -272,7 +356,6 @@ export function routeCtConnections(input: {
     const minY = Math.min(ay, by);
     const maxY = Math.max(ay, by);
 
-    // 1. Sheet bounds check (allow stepping inward if an endpoint port lies outside)
     const allowedMinX = Math.min(bounds.minX, portA.cx, portB.cx);
     const allowedMaxX = Math.max(bounds.maxX, portA.cx, portB.cx);
     const allowedMinY = Math.min(bounds.minY, portA.cy, portB.cy);
@@ -281,7 +364,6 @@ export function routeCtConnections(input: {
       return false;
     }
 
-    // 2. Component obstacle check
     for (const obs of obstacles) {
       const isEndpointComp = obs.ownerId === portA.parentId || obs.ownerId === portB.parentId;
       if (!isEndpointComp) {
@@ -304,7 +386,6 @@ export function routeCtConnections(input: {
       }
     }
 
-    // 3. Port dot check (Lines through connections)
     for (const p of allPorts) {
       if (!avoidHiddenPorts && p.hidden) continue;
       if (p.objId === portA.objId || p.objId === portB.objId) continue;
@@ -315,7 +396,6 @@ export function routeCtConnections(input: {
       }
     }
 
-    // 4. Collinear overlap check (Superimposed lines)
     const touchesEndpoint =
       allowSharedEndpointStem &&
       ((ax === portA.cx && ay === portA.cy) ||
@@ -360,6 +440,34 @@ export function routeCtConnections(input: {
       }
     }
     return 0;
+  };
+
+  /** Soft penalty for exiting a port opposite to its outward exitNormal. */
+  const exitNormalPenalty = (
+    curX: number,
+    curY: number,
+    nextX: number,
+    nextY: number,
+    portA: CtRoutingPort,
+    portB: CtRoutingPort,
+  ): number => {
+    let pen = 0;
+    if (curX === portA.cx && curY === portA.cy && portA.exitNormal) {
+      const v = normalToUnitVector(portA.exitNormal);
+      const sdx = Math.sign(nextX - curX);
+      const sdy = Math.sign(nextY - curY);
+      if (sdx === -v.dx && sdy === -v.dy) pen += 35000;
+      else if (sdx !== v.dx || sdy !== v.dy) pen += 4000;
+    }
+    if (nextX === portB.cx && nextY === portB.cy && portB.exitNormal) {
+      const v = normalToUnitVector(portB.exitNormal);
+      // Approaching portB along its outward normal means direction from cur -> portB is -v
+      const sdx = Math.sign(nextX - curX);
+      const sdy = Math.sign(nextY - curY);
+      if (sdx === v.dx && sdy === v.dy) pen += 35000;
+      else if (sdx !== -v.dx || sdy !== -v.dy) pen += 4000;
+    }
+    return pen;
   };
 
   const isPathValidZeroCross = (
@@ -416,20 +524,26 @@ export function routeCtConnections(input: {
 
     let goalState = -1;
     let expansions = 0;
-    const maxExpansions = 40000;
+    const maxExpansions = allowSharedEndpointStem ? 4000 : 7500;
+    const HEUR_WEIGHT = 1.35;
 
     while (heap.size > 0 && expansions < maxExpansions) {
       const top = heap.pop()!;
       const sId = top.val;
       const d = dist[sId];
-      if (top.key > d + Math.abs(xs[Math.floor((sId / 3) % nX)] - portB.cx) + Math.abs(ys[Math.floor(sId / 3 / nX)] - portB.cy) + 30001) {
-        continue;
-      }
-
       const cellIdx = Math.floor(sId / 3);
       const prevDir = sId % 3;
       const ix = cellIdx % nX;
       const iy = Math.floor(cellIdx / nX);
+      const curX = xs[ix];
+      const curY = ys[iy];
+      const hHere =
+        Math.abs(curX - portB.cx) +
+        Math.abs(curY - portB.cy) +
+        (curX !== portB.cx && curY !== portB.cy ? 30000 : 0);
+      if (top.key > d + hHere * HEUR_WEIGHT + 2) {
+        continue;
+      }
 
       if (ix === gx && iy === gy) {
         goalState = sId;
@@ -437,8 +551,6 @@ export function routeCtConnections(input: {
       }
 
       expansions++;
-      const curX = xs[ix];
-      const curY = ys[iy];
 
       for (const step of dirs) {
         const nx = ix + step.dx;
@@ -453,7 +565,8 @@ export function routeCtConnections(input: {
         const bendCost = prevDir !== 0 && prevDir !== step.dir ? 30000 : 0;
         const crossCost = countCrossings(curX, curY, nextX, nextY) * 45000;
         const nearCost = nearParallelPenalty(curX, curY, nextX, nextY);
-        const nd = d + stepDist + bendCost + crossCost + nearCost;
+        const normalCost = exitNormalPenalty(curX, curY, nextX, nextY, portA, portB);
+        const nd = d + stepDist + bendCost + crossCost + nearCost + normalCost;
         const nState = stateId(nx, ny, step.dir);
         if (nd < dist[nState]) {
           dist[nState] = nd;
@@ -462,7 +575,7 @@ export function routeCtConnections(input: {
             Math.abs(nextX - portB.cx) +
             Math.abs(nextY - portB.cy) +
             (nextX !== portB.cx && nextY !== portB.cy ? 30000 : 0);
-          heap.push(nd + heur, nState);
+          heap.push(nd + heur * HEUR_WEIGHT, nState);
         }
       }
     }
@@ -482,7 +595,7 @@ export function routeCtConnections(input: {
     return simplifyOrthogonalPath(rawPath);
   };
 
-  // Partition into manifold bridges (routed first) and normal edges (sorted shortest Manhattan first)
+  // Partition into manifold bridges (routed first) and normal edges (shortest Manhattan first)
   const bridgeEdges = edges.filter((e) => e.isManifoldBridge);
   const normalEdges = edges
     .filter((e) => !e.isManifoldBridge)
@@ -518,18 +631,36 @@ export function routeCtConnections(input: {
     const pA = { x: portA.cx, y: portA.cy };
     const pB = { x: portB.cx, y: portB.cy };
 
-    // Fast path: 0-bend straight or 1-bend L-route with zero crossings
     let chosen: RawPoint[] | null = null;
     const fastCandidates: RawPoint[][] = [];
     if (pA.x === pB.x || pA.y === pB.y) {
       fastCandidates.push([pA, pB]);
     } else {
-      fastCandidates.push([pA, { x: pB.x, y: pA.y }, pB]);
-      fastCandidates.push([pA, { x: pA.x, y: pB.y }, pB]);
+      // Order 1-bend L-candidates to respect portA's exitNormal first
+      const preferHorizFirst = portA.exitNormal === 'E' || portA.exitNormal === 'W';
+      if (preferHorizFirst) {
+        fastCandidates.push([pA, { x: pB.x, y: pA.y }, pB]);
+        fastCandidates.push([pA, { x: pA.x, y: pB.y }, pB]);
+      } else {
+        fastCandidates.push([pA, { x: pA.x, y: pB.y }, pB]);
+        fastCandidates.push([pA, { x: pB.x, y: pA.y }, pB]);
+      }
+      // Also test clean channel-allocated Z-routes along horizontal and vertical mid-corridors
+      const trackIdx = channelTracks.get(edge.key) ?? 0;
+      const midY = Math.round((pA.y + pB.y) / 2) + ((trackIdx % 5) - 2) * 5120;
+      if (midY > bounds.minY && midY < bounds.maxY) {
+        fastCandidates.push([pA, { x: pA.x, y: midY }, { x: pB.x, y: midY }, pB]);
+      }
+      const midX = Math.round((pA.x + pB.x) / 2) + ((trackIdx % 5) - 2) * 5120;
+      if (midX > bounds.minX && midX < bounds.maxX) {
+        fastCandidates.push([pA, { x: midX, y: pA.y }, { x: midX, y: pB.y }, pB]);
+      }
     }
+
     for (const cand of fastCandidates) {
-      if (isPathValidZeroCross(cand, portA, portB)) {
-        chosen = cand;
+      const simplified = simplifyOrthogonalPath(cand);
+      if (isPathValidZeroCross(simplified, portA, portB)) {
+        chosen = simplified;
         break;
       }
     }
@@ -543,7 +674,6 @@ export function routeCtConnections(input: {
     }
 
     if (!chosen) {
-      // Deterministic orthogonal fallback
       const midY = Math.round((pA.y + pB.y) / 2);
       chosen = simplifyOrthogonalPath(
         pA.x === pB.x || pA.y === pB.y
@@ -559,13 +689,109 @@ export function routeCtConnections(input: {
   return result;
 }
 
+/**
+ * Millimeter-domain wrapper over `routeCtConnections` so `layoutRouter.ts` and
+ * `ctSvgRenderer.ts` execute the exact same channel-allocated obstacle-avoiding router
+ * as `ctTextCodec.ts`.
+ */
+export function routeDocumentConnectionsMm(doc: CircuitDocument): Map<string, Point2D[]> {
+  const MM_TO_RAW = 2560; // clean integer scaling matching FluidSIM raw density (~2.56k/mm)
+  const sheetW = Math.max(210, doc.metadata.sheetWidthMm || 297);
+  const sheetH = Math.max(148, doc.metadata.sheetHeightMm || 210);
+  const bounds: CtSheetBounds = {
+    minX: Math.round(4 * MM_TO_RAW),
+    minY: Math.round(4 * MM_TO_RAW),
+    maxX: Math.round((sheetW - 4) * MM_TO_RAW),
+    maxY: Math.round((sheetH - 4) * MM_TO_RAW),
+  };
+
+  const obstacles: CtRoutingObstacle[] = [];
+  const ports = new Map<number, CtRoutingPort>();
+  const compOwnerId = new Map<string, number>();
+  const portObjIdMap = new Map<string, number>();
+
+  let nextId = 1;
+  for (const comp of doc.components) {
+    if (!comp.layout) continue;
+    const ownerId = nextId++;
+    compOwnerId.set(comp.id, ownerId);
+
+    const proto = getFluidSim45Prototype(comp.type);
+    const rot = normalizeRotationDeg(comp.rotationDeg ?? comp.layout.rotationDeg);
+    const flipped = mirrorToFlippedCode(comp.mirror ?? comp.layout.mirror, comp.flipped ?? comp.layout.flipped);
+    const baseW = proto?.sizeMm.width ?? 20;
+    const baseH = proto?.sizeMm.height ?? 12;
+    const box = transformBox(baseW, baseH, rot, flipped);
+
+    const x1 = Math.round(comp.layout.x * MM_TO_RAW);
+    const y1 = Math.round(comp.layout.y * MM_TO_RAW);
+    const x2 = Math.round((comp.layout.x + box.w) * MM_TO_RAW);
+    const y2 = Math.round((comp.layout.y + box.h) * MM_TO_RAW);
+
+    const isJunction = comp.type === 'pneumatic_junction' || comp.type === 'electrical_junction';
+    obstacles.push({
+      ownerId,
+      cls: isJunction
+        ? comp.type === 'pneumatic_junction'
+          ? 'PTriconnection'
+          : 'ETriconnection'
+        : proto?.fluidsimClass ?? comp.type,
+      x1,
+      y1,
+      x2,
+      y2,
+    });
+
+    for (const g of proto?.gates ?? []) {
+      if (!g.portName) continue;
+      const pid = nextId++;
+      const tPos = transformPoint(g.offsetMm.x, g.offsetMm.y, baseW, baseH, rot, flipped);
+      const tNorm = transformNormal(g.normal, rot, flipped);
+      ports.set(pid, {
+        objId: pid,
+        parentId: ownerId,
+        cls: g.domain === 'electrical' ? 'EConnection' : 'PConnection',
+        cx: Math.round((comp.layout.x + tPos.x) * MM_TO_RAW),
+        cy: Math.round((comp.layout.y + tPos.y) * MM_TO_RAW),
+        hidden: false,
+        exitNormal: tNorm,
+      });
+      portObjIdMap.set(`${comp.id}::${g.portName}`, pid);
+    }
+  }
+
+  const edges: CtRoutingEdge[] = [];
+  for (const edge of doc.connections) {
+    const fId = portObjIdMap.get(`${edge.from.componentId}::${edge.from.port}`);
+    const tId = portObjIdMap.get(`${edge.to.componentId}::${edge.to.port}`);
+    if (fId === undefined || tId === undefined) continue;
+    edges.push({
+      key: edge.id,
+      fromPortId: fId,
+      toPortId: tId,
+    });
+  }
+
+  const rawPaths = routeCtConnections({ bounds, obstacles, ports, edges });
+  const mmPaths = new Map<string, Point2D[]>();
+  for (const [edgeId, rawPts] of rawPaths.entries()) {
+    mmPaths.set(
+      edgeId,
+      rawPts.map((pt) => ({
+        x: Number((pt.x / MM_TO_RAW).toFixed(2)),
+        y: Number((pt.y / MM_TO_RAW).toFixed(2)),
+      })),
+    );
+  }
+  return mmPaths;
+}
+
 export function verifyCtWireGeometryInvariants(
   ctBody: string,
   options?: { sheetWidthMm?: number; sheetHeightMm?: number },
 ): CtWireGeometryReport {
   const ast = parseCtBodyAst(ctBody);
 
-  // Determine sheet dimensions from options or embedded _MCP_SHEET_W / _MCP_SHEET_H
   let sheetW = options?.sheetWidthMm ?? 297;
   let sheetH = options?.sheetHeightMm ?? 210;
   if (!options?.sheetWidthMm || !options?.sheetHeightMm) {
@@ -586,11 +812,6 @@ export function verifyCtWireGeometryInvariants(
   const parentOfPort = new Map<number, number>();
   for (const g of ast.gates) {
     parentOfPort.set(g.childId, g.parentId);
-  }
-
-  const objById = new Map<number, (typeof ast.objects)[number]>();
-  for (const obj of ast.objects) {
-    objById.set(obj.objId, obj);
   }
 
   const outOfBoundsObjects: CtWireGeometryReport['outOfBoundsObjects'] = [];

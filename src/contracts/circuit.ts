@@ -1,6 +1,7 @@
 /**
- * Semantic Intermediate Representation (IR) for FluidSIM Pneumatics 4.5 circuits.
- * Agents interact exclusively with semantic topology; geometry is managed by layoutRouter.
+ * Semantic Net-Based Intermediate Representation (IR v2) for FluidSIM Pneumatics 4.5 circuits.
+ * Agents interact exclusively with semantic topology, named nets, inline port terminators,
+ * and D4 orientations (rotationDeg + mirror); geometry is managed by layoutRouter & ctWireRouter.
  */
 
 import type { ValveActuationType } from './catalog';
@@ -8,6 +9,15 @@ import type { ValveActuationType } from './catalog';
 export type SheetSizePreset = 'DIN_A4_LANDSCAPE' | 'DIN_A3_LANDSCAPE' | 'DIN_A4_PORTRAIT';
 
 export type SheetDomain = 'electro-pneumatic' | 'pneumatic-only' | 'electrical-only';
+
+/** Full D4 reflection states matching FluidSIM 4.5 FLIPPED ∈ {0, 1, 2, 3}. */
+export type MirrorMode = 'none' | 'horizontal' | 'vertical' | 'both';
+
+/** FluidSIM 4.5 numeric FLIPPED code: 0=none, 1=horizontal, 2=vertical, 3=both (H+V). */
+export type FluidSimFlippedCode = 0 | 1 | 2 | 3;
+
+/** Inline pneumatic port terminator mapped directly to FluidSIM PConnection ex_type (EX3 / EX4). */
+export type PortTerminatorType = 'exhaust_silencer' | 'blind_plug';
 
 export function getSheetDimensions(preset: SheetSizePreset = 'DIN_A4_LANDSCAPE'): {
   sheetWidthMm: number;
@@ -54,7 +64,9 @@ export interface ComponentLayout {
   x: number;
   y: number;
   rotationDeg?: 0 | 90 | 180 | 270;
-  flipped?: boolean;
+  /** Legacy boolean or full FluidSIM 4.5 FLIPPED code (0..3). */
+  flipped?: boolean | FluidSimFlippedCode;
+  mirror?: MirrorMode;
 }
 
 export interface ComponentNode {
@@ -71,8 +83,18 @@ export interface ComponentNode {
   rightActuation?: ValveActuationSide;
   /** Actuator distance-rule sensor markers (linear mm or swivel deg). */
   distanceRule?: DistanceRuleMarker[];
-  /** Semantic component orientation (0 | 90 | 180 | 270 deg), synced with layout.rotationDeg without needing manual x/y coords. */
+  /** Semantic component CCW rotation (0 | 90 | 180 | 270 deg), synced with layout.rotationDeg. */
   rotationDeg?: 0 | 90 | 180 | 270;
+  /** Semantic D4 mirror reflection ('none' | 'horizontal' | 'vertical' | 'both') mapped to FluidSIM FLIPPED 0..3. */
+  mirror?: MirrorMode;
+  /** Optional legacy/numeric mirror alias synced with mirror. */
+  flipped?: boolean | FluidSimFlippedCode;
+  /** Optional logical station/branch grouping hint (e.g. "branch_1", "magazine", "vacuum"). */
+  group?: string;
+  /** Optional schematic section banner rendered cleanly above this branch/station column. */
+  sectionLabel?: string;
+  /** Inline pneumatic port terminators (e.g. { "3": "exhaust_silencer", "5": "exhaust_silencer", "12": "blind_plug" }). */
+  portTerminators?: Record<string, PortTerminatorType>;
   /** Computed or preserved 2D placement (auto-populated by layoutRouter). */
   layout?: ComponentLayout;
   /** Lossless preservation bucket for raw FluidSIM 4.5 .ct attributes. */
@@ -89,10 +111,25 @@ export interface ConnectionEdge {
   from: PortRef;
   to: PortRef;
   domain: 'pneumatic' | 'electrical';
-  /** Auto-routed orthogonal polyline waypoints in FluidSIM grid coordinates. */
+  /** Auto-routed orthogonal polyline waypoints in mm (unified with FluidSIM .ct L segments). */
   waypoints?: Point2D[];
+  /** Optional owning named net ID when expanded from CircuitNet. */
+  netId?: string;
   /** Lossless preservation bucket for raw .ct wire/hose properties. */
   rawMetadata?: Record<string, unknown>;
+}
+
+/**
+ * First-class named shared net (IR v2).
+ * Automatically lowered into 3-gate PTriconnection / ETriconnection T-junction trees by topologyNormalizer.
+ */
+export interface CircuitNet {
+  id: string;
+  name?: string;
+  domain: 'pneumatic' | 'electrical';
+  endpoints: PortRef[];
+  /** Optional inline net terminators (e.g. exhaust silencer or blind plug on a shared exhaust/supply bus). */
+  terminators?: PortTerminatorType[];
 }
 
 export interface CircuitMetadata {
@@ -118,10 +155,12 @@ export interface RawAstPreservation {
 }
 
 export interface CircuitDocument {
-  schemaVersion: '1.0';
+  schemaVersion: '1.0' | '2.0';
   metadata: CircuitMetadata;
   components: ComponentNode[];
   connections: ConnectionEdge[];
+  /** Optional first-class named shared nets (IR v2). */
+  nets?: CircuitNet[];
   rawAst?: RawAstPreservation;
 }
 
@@ -138,7 +177,7 @@ export type CircuitPatchOp =
   | {
       op: 'remove_component';
       id: string;
-      /** If true, also removes attached edges (default true). */
+      /** If true, also removes attached edges/net memberships (default true). */
       removeConnectedEdges?: boolean;
     }
   | {
@@ -163,4 +202,18 @@ export type CircuitPatchOp =
       componentId: string;
       label: string;
       side?: 'component' | 'leftActuation' | 'rightActuation';
+    }
+  | {
+      op: 'set_port_terminator';
+      componentId: string;
+      port: string;
+      terminator: PortTerminatorType | 'none';
+    }
+  | {
+      op: 'set_net';
+      net: CircuitNet;
+    }
+  | {
+      op: 'remove_net';
+      netId: string;
     };

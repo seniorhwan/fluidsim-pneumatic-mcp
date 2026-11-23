@@ -5,15 +5,17 @@ import type {
   StaticValidationReport,
 } from '../contracts/simulation';
 import { getCatalogComponent, getPortDefinition } from '../catalog/pneumatics45';
+import { normalizeCircuitTopology } from '../authoring/topologyNormalizer';
 
 function portKey(componentId: string, port: string): string {
   return `${componentId}::${port}`;
 }
 
 export function validateCircuitStatic(
-  doc: CircuitDocument,
+  rawDoc: CircuitDocument,
   options?: StaticValidationOptions,
 ): StaticValidationReport {
+  const { document: doc } = normalizeCircuitTopology(rawDoc);
   const allowExternalElectricalSheet =
     options?.allowExternalElectricalSheet === true ||
     doc.metadata.allowExternalElectricalSheet === true ||
@@ -430,7 +432,10 @@ export function validateCircuitStatic(
         comp.type === 'air_filter' ||
         comp.type === 'air_reservoir' ||
         comp.type === 'check_valve' ||
-        comp.type === 'check_valve_spring'
+        comp.type === 'check_valve_spring' ||
+        comp.type === 'check_valve_pilot_open' ||
+        comp.type === 'nozzle' ||
+        comp.type === 'orifice'
       ) {
         if (pname === '1') forwardPorts.push('2');
         if (pname === '2') forwardPorts.push('1');
@@ -527,7 +532,10 @@ export function validateCircuitStatic(
       }
     }
 
-    if (comp.type === 'pressure_switch_differential' && comp.label) {
+    if (
+      (comp.type === 'pressure_switch_differential' || comp.type === 'pressure_switch_pew') &&
+      comp.label
+    ) {
       const list = pressureSwitchLabels.get(comp.label) ?? [];
       list.push(comp.id);
       pressureSwitchLabels.set(comp.label, list);

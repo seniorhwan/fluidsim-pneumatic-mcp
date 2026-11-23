@@ -22,10 +22,13 @@ export function handleCircuitValidate(
     document.metadata.sheetHeightMm,
   );
   const findings = [...report.findings, ...visual.findings];
+  const errorCount = findings.filter((f) => f.severity === 'error').length;
   return {
     path: relativePath,
-    valid: report.valid,
-    errorCount: report.errorCount,
+    valid: errorCount === 0 && visual.f9SolverOk,
+    f9SolverOk: visual.f9SolverOk,
+    visualLayoutOk: visual.ok,
+    errorCount,
     warningCount: findings.filter((f) => f.severity === 'warning').length,
     findings,
   };

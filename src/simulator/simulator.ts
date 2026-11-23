@@ -18,8 +18,10 @@ import {
   createInitialPneumaticState,
   stepPneumaticSolver,
 } from './pneumaticSolver';
+import { normalizeCircuitTopology } from '../authoring/topologyNormalizer';
 
-export function simulateCircuit(doc: CircuitDocument, options: SimOptions = {}): SimResult {
+export function simulateCircuit(rawDoc: CircuitDocument, options: SimOptions = {}): SimResult {
+  const { document: doc } = normalizeCircuitTopology(rawDoc);
   const durationMs = Math.max(50, Math.min(options.durationMs ?? 5000, 60_000));
   const stepMs = Math.max(2, Math.min(options.stepMs ?? 10, 100));
   const inputs: SimInputEvent[] = options.inputs ?? [];

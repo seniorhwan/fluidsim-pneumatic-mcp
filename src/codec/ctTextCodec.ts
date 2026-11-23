@@ -4,41 +4,14 @@ import type {
   ComponentNode,
   ConnectionEdge,
   DistanceRuleMarker,
+  FluidSimFlippedCode,
   ValveActuationSide,
 } from '../contracts/circuit';
-import { isDefaultA4Header, type DecodedCtContainer } from './ctBinaryCodec';
-import {
-  getFluidSimPrintableBounds,
-  routeCtConnections,
-  verifyCtWireGeometryInvariants,
-  type CtRoutingEdge,
-  type CtRoutingObstacle,
-  type CtRoutingPort,
-  type CtWireGeometryReport,
-} from './ctWireRouter';
-import { getCatalogComponent, getPortDefinition } from '../catalog/pneumatics45';
-import { autoLayoutCircuit, getEffectivePortOffset, rotatePortOffset } from '../authoring/layoutRouter';
-import {
-  CtSymbolAllocator,
-  buildCheckValveSyms,
-  buildCylinderSyms,
-  buildDualPressureAndSym,
-  buildFilterSym,
-  buildFlowControlOneWaySym,
-  buildPressureRegulatorSym,
-  buildPressureSwitchSym,
-  buildQuickExhaustSym,
-  buildShuttleValveOrSym,
-  buildSwivelDriveSym,
-  buildThrottleValveSym,
-  buildVacuumNozzleSym,
-  buildVacuumSuckerSym,
-  buildValveSym,
-  buildWartungseinheit2Sym,
-} from './ctSymbolLibrary';
+import type { DecodedCtContainer } from './ctBinaryCodec';
+import { flippedCodeToMirror } from './ctTransform';
 
 /**
- * Lossless FluidSIM 4.5 `.ct` text AST parser & serializer + Semantic IR bridge.
+ * Lossless FluidSIM 4.5 `.ct` text AST parser + Semantic IR bridge.
  * Empirically verified against real Festo FluidSIM `.ct` files in `fixtures/golden/`.
  */
 
@@ -251,7 +224,12 @@ function mapValveActuationSide(
   const me = getScalarProp(props, meKey) ?? '';
   const ma = getScalarProp(props, maKey) ?? '';
   const hasManual = Boolean(ma && !ma.endsWith('N'));
-  const hasIntPilot = getBoolProp(props, intPilotKey) || elPn.includes('PE3') || (elPn.includes('PE1') && elPn.includes('PE2'));
+  const pilotKey = side === 'L' ? 'PILOT_L' : 'PILOT_R';
+  const hasIntPilot =
+    getBoolProp(props, intPilotKey) ||
+    getBoolProp(props, pilotKey) ||
+    elPn.includes('PE3') ||
+    (elPn.includes('PE1') && elPn.includes('PE2'));
 
   if (elPn.includes('PE1') || solenoidLabel) {
     return {
@@ -302,12 +280,16 @@ function gateNumberToPortName(type: string, gateNum: number): string | undefined
     case 'throttle_valve':
     case 'check_valve':
     case 'pressure_regulator':
+    case 'nozzle':
+    case 'orifice':
       return gateNum === 1 ? '1' : gateNum === 2 ? '2' : undefined;
     case 'check_valve_spring':
+    case 'check_valve_pilot_open':
       return gateNum === 1 ? '1' : gateNum === 2 ? '2' : gateNum === 3 ? '12' : undefined;
     case 'pressure_relief_valve':
       return gateNum === 1 ? '1' : gateNum === 2 ? '3' : undefined;
     case 'pressure_switch_differential':
+    case 'pressure_switch_pew':
       return gateNum === 1 ? 'P1' : gateNum === 2 ? 'P2' : undefined;
     case 'vacuum_suction_nozzle':
       return gateNum === 1 ? '1' : gateNum === 2 ? '3' : gateNum === 3 ? '1v' : undefined;
@@ -425,6 +407,7 @@ function portNameToGateNumber(type: string, portName: string): number {
     case 'air_motor':
       return portName === 'B' ? 2 : 1;
     case 'check_valve_spring':
+    case 'check_valve_pilot_open':
       return portName === '12' ? 3 : portName === '2' ? 2 : 1;
     case 'pressure_relief_valve':
       return portName === '3' ? 2 : 1;
@@ -448,6 +431,7 @@ function portNameToGateNumber(type: string, portName: string): number {
     case 'exhaust_silencer':
     case 'blind_plug':
     case 'pressure_gauge':
+    case 'pressure_switch_pew':
       return 1;
     case 'pushbutton_no':
     case 'limit_switch_no':
@@ -481,7 +465,7 @@ function portNameToGateNumber(type: string, portName: string): number {
 function rgbIntToLampColor(rgb: number): string {
   if (rgb === 0x00ff00 || rgb === 65280) return 'green';
   if (rgb === 0xff0000 || rgb === 16711680 || rgb === 255) return 'red';
-  if (rgb === 0xffff00 || rgb === 16776960) return 'yellow';
+  if (rgb === 0xffff00 || rgb === 16776960 || rgb === 65535) return 'yellow';
   if (rgb === 0x0000ff) return 'blue';
   if (rgb === 0xffffff || rgb === 16777215) return 'white';
   return 'green';
@@ -605,6 +589,24 @@ export function parseCtContainerToDocument(
   let explicitSheetHeightMm: number | undefined;
   let explicitSheetDomain: CircuitDocument['metadata']['sheetDomain'];
   let explicitAllowExtElec: boolean | undefined;
+  let parsedUnitPerMm = FS_UNIT_PER_MM;
+  let parsedOriginX = 0;
+  let parsedOriginY = 0;
+
+  for (const obj of ast.objects) {
+    if (obj.cls !== 'text' || getScalarProp(obj.props, '_MCP_LABEL_FOR')) continue;
+    const upm = getNumberProp(obj.props, '_MCP_UNIT_PER_MM', NaN);
+    const ox = getNumberProp(obj.props, '_MCP_ORIGIN_X', NaN);
+    const oy = getNumberProp(obj.props, '_MCP_ORIGIN_Y', NaN);
+    if (Number.isFinite(upm) && upm >= 512) parsedUnitPerMm = upm;
+    if (Number.isFinite(ox)) parsedOriginX = ox;
+    if (Number.isFinite(oy)) parsedOriginY = oy;
+    break;
+  }
+
+  const rawToMmX = (rx: number): number => Math.round(((rx - parsedOriginX) / parsedUnitPerMm) * 10) / 10;
+  const rawToMmY = (ry: number): number => Math.round(((ry - parsedOriginY) / parsedUnitPerMm) * 10) / 10;
+
   const usedIds = new Set<string>();
   const allocId = (preferred: string): string => {
     let candidate = preferred;
@@ -657,11 +659,12 @@ export function parseCtContainerToDocument(
     const objGates = (gatesByParent.get(objIdx) ?? []).sort((a, b) => a.gateNum - b.gateNum);
 
     const rotDeg = normalizeRotation(obj.rot);
+    const flipCode = (obj.flip === 1 || obj.flip === 2 || obj.flip === 3 ? obj.flip : 0) as FluidSimFlippedCode;
     const layout = {
-      x: Math.round((obj.x1 / FS_UNIT_PER_MM) * 10) / 10,
-      y: Math.round((obj.y1 / FS_UNIT_PER_MM) * 10) / 10,
+      x: rawToMmX(obj.x1),
+      y: rawToMmY(obj.y1),
       rotationDeg: rotDeg,
-      flipped: obj.flip !== 0,
+      ...(flipCode !== 0 ? { flipped: flipCode, mirror: flippedCodeToMirror(flipCode) } : {}),
     };
 
     const rawMetadata: Record<string, unknown> = {
@@ -697,15 +700,18 @@ export function parseCtContainerToDocument(
 
     const elecRailOwner = getScalarProp(obj.props, '_MCP_ELEC_RAIL_OWNER');
     const elecRailType = getScalarProp(obj.props, '_MCP_ELEC_RAIL_TYPE');
-    if (elecRailOwner && elecRailType && obj.cls === 'ETriconnection') {
+    if (elecRailOwner && elecRailType && (obj.cls === 'ETriconnection' || obj.cls === 'PTriconnection')) {
       compIdByObjIdx.set(objIdx, elecRailOwner);
       compTypeByObjIdx.set(objIdx, elecRailType);
-      if (elecRailType === 'electrical_junction' && !manifoldIdSet.has(elecRailOwner)) {
+      if (
+        (elecRailType === 'electrical_junction' || elecRailType === 'pneumatic_junction') &&
+        !manifoldIdSet.has(elecRailOwner)
+      ) {
         manifoldIdSet.add(elecRailOwner);
         usedIds.add(elecRailOwner);
         components.push({
           id: elecRailOwner,
-          type: 'electrical_junction',
+          type: elecRailType,
           params: {},
           ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
           layout,
@@ -873,11 +879,13 @@ export function parseCtContainerToDocument(
       };
     } else if (obj.cls === 'CylDGPPAB') {
       const pGates = objGates.filter((g) => objByIdx.get(g.childId)?.cls === 'PConnection');
+      const isRodless = getBoolProp(obj.props, 'SLEDGE');
       const isSingleActing =
-        getBoolProp(obj.props, 'SPRING_R') ||
-        (getScalarProp(obj.props, 'description') ?? '').toLowerCase().includes('einfachwirkend') ||
-        pGates.length <= 1;
-      const strokeMm = getNumberProp(obj.props, 'HUB', isSingleActing ? 50 : 100);
+        !isRodless &&
+        (getBoolProp(obj.props, 'SPRING_R') ||
+          (getScalarProp(obj.props, 'description') ?? '').toLowerCase().includes('einfachwirkend') ||
+          pGates.length <= 1);
+      const strokeMm = getNumberProp(obj.props, 'HUB', isRodless ? 200 : isSingleActing ? 50 : 100);
       const areaCapCm2 = getNumberProp(obj.props, 'A_K', 3.14159);
       const areaRingCm2 = getNumberProp(obj.props, 'A_R', 2.63894);
       const pistonDiameterMm = Math.max(6, Math.round(20 * Math.sqrt(Math.max(0.1, areaCapCm2) / Math.PI)));
@@ -890,18 +898,24 @@ export function parseCtContainerToDocument(
       const springForceN = getNumberProp(obj.props, '_MCP_SPRING_N', 25);
       node = {
         id,
-        type: isSingleActing ? 'cylinder_single_acting' : 'cylinder_double_acting',
+        type: isRodless
+          ? 'cylinder_rodless'
+          : isSingleActing
+            ? 'cylinder_single_acting'
+            : 'cylinder_double_acting',
         ...(lbl ? { label: lbl } : {}),
-        params: isSingleActing
-          ? { strokeMm, pistonDiameterMm, springForceN, externalLoadN, initialPositionMm }
-          : {
-              strokeMm,
-              pistonDiameterMm,
-              rodDiameterMm,
-              externalLoadN,
-              cushioning: getBoolProp(obj.props, 'DAMPING_R') || getBoolProp(obj.props, 'DAMPING_L'),
-              initialPositionMm,
-            },
+        params: isRodless
+          ? { strokeMm, pistonDiameterMm, externalLoadN, initialPositionMm }
+          : isSingleActing
+            ? { strokeMm, pistonDiameterMm, springForceN, externalLoadN, initialPositionMm }
+            : {
+                strokeMm,
+                pistonDiameterMm,
+                rodDiameterMm,
+                externalLoadN,
+                cushioning: getBoolProp(obj.props, 'DAMPING_R') || getBoolProp(obj.props, 'DAMPING_L'),
+                initialPositionMm,
+              },
         ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
         layout,
         rawMetadata,
@@ -911,6 +925,17 @@ export function parseCtContainerToDocument(
         cx: (obj.x1 + obj.x2) / 2,
         cy: (obj.y1 + obj.y2) / 2,
       });
+    } else if (obj.cls === 'PAR2') {
+      const lbl = getCompLabelProp(obj.props);
+      node = {
+        id,
+        type: 'air_motor',
+        ...(lbl ? { label: lbl } : {}),
+        params: { displacementCc: getNumberProp(obj.props, '_MCP_DISP_CC', 10) },
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
     } else if (obj.cls === 'WV_2' || obj.cls === 'WV_3' || obj.cls === 'WV_4' || obj.cls === 'WV_5') {
       const bodyCount = getNumberProp(obj.props, 'BODY_COUNT', 2);
       const type =
@@ -967,7 +992,7 @@ export function parseCtContainerToDocument(
       };
     } else if (obj.cls === 'DV_P1') {
       const pGates = objGates.filter((g) => objByIdx.get(g.childId)?.cls === 'PConnection');
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
       if (pGates.length >= 3) {
         node = {
           id,
@@ -981,12 +1006,11 @@ export function parseCtContainerToDocument(
       } else {
         const level = getNumberProp(obj.props, 'LEVEL', 50);
         const openingPct = Math.max(1, Math.min(100, level > 0 ? level : 50));
-        const freeFlowDirection = getScalarProp(obj.props, '_MCP_FREE_FLOW') === '2_to_1' ? '2_to_1' : '1_to_2';
         node = {
           id,
-          type: 'flow_control_one_way',
+          type: 'throttle_valve',
           ...(lbl ? { label: lbl } : {}),
-          params: { openingPct, freeFlowDirection },
+          params: { openingPct },
           ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
           layout,
           rawMetadata,
@@ -995,7 +1019,7 @@ export function parseCtContainerToDocument(
     } else if (obj.cls === 'DRSV1_pneu') {
       const level = getNumberProp(obj.props, 'LEVEL', 50);
       const openingPct = Math.max(1, Math.min(100, level > 0 ? level : 50));
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'throttle_valve',
@@ -1005,9 +1029,22 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
+    } else if (obj.cls === 'NozzleP') {
+      const level = getNumberProp(obj.props, 'LEVEL', 50);
+      const openingPct = Math.max(1, Math.min(100, level > 0 ? level : 50));
+      const lbl = getCompLabelProp(obj.props);
+      node = {
+        id,
+        type: 'nozzle',
+        ...(lbl ? { label: lbl } : {}),
+        params: { openingPct },
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
     } else if (obj.cls === 'CheckValveP') {
       const crackingPressureBar = getNumberProp(obj.props, 'P_V', 0.1);
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'check_valve',
@@ -1017,7 +1054,7 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'CheckValveSpringLoadedP' || obj.cls === 'CheckValvePilotOperatedSpringLoadedP') {
+    } else if (obj.cls === 'CheckValveSpringLoadedP') {
       const crackingPressureBar = getNumberProp(obj.props, 'P_V', 0.3);
       const lbl = getCompLabelProp(obj.props);
       node = {
@@ -1029,8 +1066,42 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
+    } else if (obj.cls === 'CheckValvePilotOperatedSpringLoadedP') {
+      const crackingPressureBar = getNumberProp(obj.props, 'P_V', 0.2);
+      const lbl = getCompLabelProp(obj.props);
+      node = {
+        id,
+        type: 'check_valve_pilot_open',
+        ...(lbl ? { label: lbl } : {}),
+        params: { crackingPressureBar },
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
+    } else if (obj.cls === 'PVS1') {
+      const lbl = getCompLabelProp(obj.props);
+      node = {
+        id,
+        type: 'dual_pressure_valve_and',
+        ...(lbl ? { label: lbl } : {}),
+        params: {},
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
+    } else if (obj.cls === 'PVS2') {
+      const lbl = getCompLabelProp(obj.props);
+      node = {
+        id,
+        type: 'quick_exhaust_valve',
+        ...(lbl ? { label: lbl } : {}),
+        params: {},
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
     } else if (obj.cls === 'PVS3') {
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'shuttle_valve_or',
@@ -1069,7 +1140,7 @@ export function parseCtContainerToDocument(
       }
     } else if (obj.cls === 'PressureReducingValve3WaysAdjustableP') {
       const setPressureBar = getNumberProp(obj.props, 'P_SOLL', 4.0);
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'pressure_regulator',
@@ -1079,7 +1150,25 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'PEW' || obj.cls === 'PSW1') {
+    } else if (obj.cls === 'PEW') {
+      const pGates = objGates.filter((g) => objByIdx.get(g.childId)?.cls === 'PConnection');
+      const isSinglePort = pGates.length <= 1;
+      const pressureBar = getNumberProp(obj.props, 'P_SOLL', isSinglePort ? 2.5 : -0.5);
+      const hysteresisBar = getNumberProp(obj.props, '_MCP_HYST', 0.05);
+      const triggerModeRaw = getScalarProp(obj.props, '_MCP_TRIG_MODE');
+      const triggerMode =
+        triggerModeRaw === 'above' || triggerModeRaw === 'below' ? triggerModeRaw : 'auto';
+      const lbl = getCompLabelProp(obj.props);
+      node = {
+        id,
+        type: isSinglePort ? 'pressure_switch_pew' : 'pressure_switch_differential',
+        ...(lbl ? { label: lbl } : {}),
+        params: { pressureBar, hysteresisBar, triggerMode },
+        ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
+    } else if (obj.cls === 'PSW1') {
       const pressureBar = getNumberProp(obj.props, 'P_SOLL', -0.5);
       const hysteresisBar = getNumberProp(obj.props, '_MCP_HYST', 0.05);
       const triggerModeRaw = getScalarProp(obj.props, '_MCP_TRIG_MODE');
@@ -1095,8 +1184,13 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'PressureGaugeP' || obj.cls === 'ManometerP' || obj.cls === 'PM1') {
-      const lbl = getScalarProp(obj.props, 'label');
+    } else if (
+      obj.cls === 'PressureIndicatorP' ||
+      obj.cls === 'PressureGaugeP' ||
+      obj.cls === 'ManometerP' ||
+      obj.cls === 'PM1'
+    ) {
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'pressure_gauge',
@@ -1106,9 +1200,9 @@ export function parseCtContainerToDocument(
         layout,
         rawMetadata,
       };
-    } else if (obj.cls === 'ReservoirP' || obj.cls === 'AirTankP') {
+    } else if (obj.cls === 'AccPneu1' || obj.cls === 'ReservoirP' || obj.cls === 'AirTankP') {
       const volumeL = getNumberProp(obj.props, 'V', 1.0);
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'air_reservoir',
@@ -1120,10 +1214,16 @@ export function parseCtContainerToDocument(
       };
     } else if (obj.cls === 'SilencerP') {
       node = { id, type: 'exhaust_silencer', params: {}, layout, rawMetadata };
-    } else if (obj.cls === 'TimeDelayValveP' || obj.cls === 'VZ_NC' || obj.cls === 'VZ_NO') {
+    } else if (
+      obj.cls === 'TimerClosedP' ||
+      obj.cls === 'TimerOpenP' ||
+      obj.cls === 'TimeDelayValveP' ||
+      obj.cls === 'VZ_NC' ||
+      obj.cls === 'VZ_NO'
+    ) {
       const delayMs = Math.max(10, Math.round(getNumberProp(obj.props, 'DELAY_TIME', 10) * 100));
-      const normalState = obj.cls === 'VZ_NO' ? 'NO' : 'NC';
-      const lbl = getScalarProp(obj.props, 'label');
+      const normalState = obj.cls === 'VZ_NO' || obj.cls === 'TimerOpenP' ? 'NO' : 'NC';
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'time_delay_valve',
@@ -1135,13 +1235,23 @@ export function parseCtContainerToDocument(
       };
     } else if (obj.cls === 'PressureSequenceValveP' || obj.cls === 'DFV') {
       const thresholdBar = getNumberProp(obj.props, 'P_SOLL', 4.0);
-      const lbl = getScalarProp(obj.props, 'label');
+      const lbl = getCompLabelProp(obj.props);
       node = {
         id,
         type: 'pressure_sequence_valve',
         ...(lbl ? { label: lbl } : {}),
         params: { thresholdBar },
         ...(rotDeg !== 0 ? { rotationDeg: rotDeg } : {}),
+        layout,
+        rawMetadata,
+      };
+    } else if (obj.cls === 'E_B001') {
+      const lbl = getCompLabelProp(obj.props);
+      node = {
+        id,
+        type: 'proximity_switch_magnetic',
+        ...(lbl ? { label: lbl } : {}),
+        params: { normalState: getScalarProp(obj.props, '_MCP_NORMAL_STATE') === 'NC' ? 'NC' : 'NO' },
         layout,
         rawMetadata,
       };
@@ -1159,7 +1269,11 @@ export function parseCtContainerToDocument(
       obj.cls === 'LSchalter_s'
     ) {
       const lbl = getScalarProp(obj.props, 'label');
-      const isDetent = obj.cls === 'E_S031' || obj.cls === 'E_S021' || obj.cls === 'LSchalter_s';
+      const isDetent =
+        obj.cls === 'E_S031' ||
+        obj.cls === 'E_S021' ||
+        obj.cls === 'LSchalter_s' ||
+        getBoolProp(obj.props, '_MCP_DETENT');
       node = {
         id,
         type: 'pushbutton_no',
@@ -1310,6 +1424,17 @@ export function parseCtContainerToDocument(
     }
 
     if (node) {
+      // Restore v2 mirror / flipped / group / sectionLabel metadata
+      const flipVal = (obj.flip === 1 || obj.flip === 2 || obj.flip === 3 ? obj.flip : 0) as FluidSimFlippedCode;
+      if (flipVal !== 0) {
+        node.flipped = flipVal;
+        node.mirror = flippedCodeToMirror(flipVal);
+      }
+      const secLbl = getScalarProp(obj.props, '_MCP_SECTION_LABEL');
+      if (secLbl) node.sectionLabel = secLbl;
+      const grp = getScalarProp(obj.props, '_MCP_GROUP');
+      if (grp) node.group = grp;
+
       components.push(node);
       compIdByObjIdx.set(objIdx, node.id);
       compTypeByObjIdx.set(objIdx, node.type);
@@ -1362,6 +1487,7 @@ export function parseCtContainerToDocument(
     portB: string,
     domain: 'pneumatic' | 'electrical',
     preferredId: string,
+    waypoints?: Array<{ x: number; y: number }>,
   ): void => {
     if (compIdA === compIdB && portA === portB) return;
     const ka = `${compIdA}:${portA}`;
@@ -1374,6 +1500,7 @@ export function parseCtContainerToDocument(
       from: { componentId: compIdA, port: portA },
       to: { componentId: compIdB, port: portB },
       domain,
+      ...(waypoints && waypoints.length >= 2 ? { waypoints } : {}),
     });
   };
 
@@ -1457,18 +1584,46 @@ export function parseCtContainerToDocument(
   }
   const parsedPolylines: ParsedPolylineInfo[] = [];
 
+  const extractPortObjSegments = (
+    portObj: RawCtObject | undefined,
+  ): Array<{ x1: number; y1: number; x2: number; y2: number }> => {
+    if (!portObj) return [];
+    const cx = Math.round((portObj.x1 + portObj.x2) / 2);
+    const cy = Math.round((portObj.y1 + portObj.y2) / 2);
+    const out: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+    for (const pl of portObj.props) {
+      const lm = pl.match(/^\s*L\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)$/);
+      if (!lm) continue;
+      out.push({
+        x1: cx + Number(lm[1]) - 5120,
+        y1: cy + Number(lm[2]) - 5120,
+        x2: cx + Number(lm[3]) + 5120,
+        y2: cy + Number(lm[4]) + 5120,
+      });
+    }
+    return out;
+  };
+
   for (const con of ast.connections) {
     if (getBoolProp(con.props, '_MCP_MANIFOLD_LINK')) continue;
     const epA = resolveEndpoint(con.portObjA);
     const epB = resolveEndpoint(con.portObjB);
     const segs: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
     for (const pl of con.props) {
-      const m = pl.match(/^L\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)/);
+      const m = pl.match(/^\s*L\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)/);
       if (m) {
         segs.push({ x1: Number(m[1]), y1: Number(m[2]), x2: Number(m[3]), y2: Number(m[4]) });
       }
     }
     if (!epA || !epB) continue;
+
+    // FluidSIM 4.5 stores routed orthogonal wire segments (`L dx1 dy1 dx2 dy2`) on portObjA.props
+    const portSegs =
+      segs.length > 0
+        ? segs
+        : extractPortObjSegments(epA.portObj).length > 0
+          ? extractPortObjSegments(epA.portObj)
+          : extractPortObjSegments(epB.portObj);
 
     const domain: 'pneumatic' | 'electrical' =
       con.kind === 'PLine'
@@ -1479,8 +1634,33 @@ export function parseCtContainerToDocument(
             ? 'pneumatic'
             : 'electrical';
 
+    let waypoints: Array<{ x: number; y: number }> | undefined;
+    if (portSegs.length > 0) {
+      const pts: Array<{ x: number; y: number }> = [{ x: rawToMmX(portSegs[0].x1), y: rawToMmY(portSegs[0].y1) }];
+      for (const s of portSegs) {
+        const p1 = { x: rawToMmX(s.x1), y: rawToMmY(s.y1) };
+        const p2 = { x: rawToMmX(s.x2), y: rawToMmY(s.y2) };
+        const last = pts[pts.length - 1];
+        if (Math.hypot(p1.x - last.x, p1.y - last.y) > 0.15) {
+          pts.push(p1);
+        }
+        if (Math.hypot(p2.x - pts[pts.length - 1].x, p2.y - pts[pts.length - 1].y) > 0.15) {
+          pts.push(p2);
+        }
+      }
+      if (pts.length >= 2) waypoints = pts;
+    }
+
     const customEdgeId = getScalarProp(con.props, '_MCP_EDGE_ID');
-    recordEdge(epA.compId, epA.port, epB.compId, epB.port, domain, customEdgeId || `E_${con.portObjA}_${con.portObjB}`);
+    recordEdge(
+      epA.compId,
+      epA.port,
+      epB.compId,
+      epB.port,
+      domain,
+      customEdgeId || `E_${con.portObjA}_${con.portObjB}`,
+      waypoints,
+    );
     if (segs.length > 0) {
       parsedPolylines.push({
         domain,
@@ -1604,8 +1784,8 @@ export function parseCtContainerToDocument(
         type: 'blind_plug',
         params: {},
         layout: {
-          x: Math.round((obj.x1 / FS_UNIT_PER_MM) * 10) / 10,
-          y: Math.round((obj.y1 / FS_UNIT_PER_MM) * 10) / 10,
+          x: rawToMmX(obj.x1),
+          y: rawToMmY(obj.y1),
         },
         rawMetadata: { embeddedExType: 'EX4', ownerPortObjId: obj.objId },
       });
@@ -1625,8 +1805,8 @@ export function parseCtContainerToDocument(
         type: 'exhaust_silencer',
         params: {},
         layout: {
-          x: Math.round((obj.x1 / FS_UNIT_PER_MM) * 10) / 10,
-          y: Math.round((obj.y1 / FS_UNIT_PER_MM) * 10) / 10,
+          x: rawToMmX(obj.x1),
+          y: rawToMmY(obj.y1),
         },
         rawMetadata: { embeddedExType: exType, ownerPortObjId: obj.objId },
       });
@@ -1659,8 +1839,8 @@ export function parseCtContainerToDocument(
       type: 'exhaust_silencer',
       params: {},
       layout: {
-        x: Math.round((obj.x2 / FS_UNIT_PER_MM) * 10) / 10,
-        y: Math.round((obj.y1 / FS_UNIT_PER_MM) * 10) / 10,
+        x: rawToMmX(obj.x2),
+        y: rawToMmY(obj.y1),
       },
       rawMetadata: { embeddedExType: 'EX3', ownerPortObjId: obj.objId },
     });
@@ -1731,2210 +1911,10 @@ export function parseCtContainerToDocument(
   };
 }
 
-function getFluidSimActuationProps(
-  side: 'L' | 'R',
-  act?: ValveActuationSide,
-): string[] {
-  const prefix = side === 'L' ? 'AL' : 'AR';
-  const springKey = side === 'L' ? 'SPRING_L' : 'SPRING_R';
-  const pneuSpringKey = side === 'L' ? 'PNEU_SPRING_L' : 'PNEU_SPRING_R';
-  const elPnKey = side === 'L' ? 'ACTUATION_L_EL_PN' : 'ACTUATION_R_EL_PN';
-  const meKey = side === 'L' ? 'ACTUATION_L_ME' : 'ACTUATION_R_ME';
-  const maKey = side === 'L' ? 'ACTUATION_L_MA' : 'ACTUATION_R_MA';
-  const intPilotKey = side === 'L' ? '_MCP_INT_PILOT_L' : '_MCP_INT_PILOT_R';
-
-  const type = act?.type ?? 'none';
-  const isSpring = type === 'spring' || (type === 'pneumatic_spring' && act?.springReturn === true);
-  const isPneuSpring = type === 'pneumatic_spring';
-  const elPn =
-    type === 'solenoid'
-      ? act?.internalPilot
-        ? `${prefix}_PE1_PE2`
-        : `${prefix}_PE1`
-      : type === 'pneumatic_pilot'
-        ? `${prefix}_PE2`
-        : `${prefix}N`;
-  const me = type === 'roller' || type === 'idle_return_roller' ? `${prefix}_ME2` : `${prefix}N`;
-  const ma =
-    type === 'detent'
-      ? `${prefix}_MA4F`
-      : type === 'pushbutton' || act?.manualOverride
-        ? `${prefix}_MA5`
-        : `${prefix}N`;
-
-  return [
-    ` S ${springKey}_FEST B T`,
-    ` S ${springKey} S ${isSpring ? 'TRUE' : 'FALSE'}`,
-    ...(isPneuSpring ? [` S ${pneuSpringKey}_FEST B T`, ` S ${pneuSpringKey} S TRUE`] : []),
-    ` S ${elPnKey}_FEST B T`,
-    ` S ${elPnKey} S ${elPn}`,
-    ...(act?.internalPilot ? [` S ${intPilotKey} B T`] : []),
-    ` S ${meKey}_FEST B T`,
-    ` S ${meKey} S ${me}`,
-    ` S ${maKey}_FEST B T`,
-    ` S ${maKey} S ${ma}`,
-  ];
-}
-
-/**
- * Serializes a CircuitDocument into FluidSIM 4.5 `.ct` text body + container metadata.
- * If the document originated from a native `.ct` file and its semantic topology has NOT changed,
- * returns the exact original `ctBody` verbatim (100% lossless roundtrip).
- */
-export function serializeDocumentToCtContainer(document: CircuitDocument): {
-  headerLinesB64?: string[];
-  profile?: Partial<DecodedCtContainer['profile']>;
-  previewBlockB64?: string;
-  fsPreviewBlock?: string;
-  ctBody: string;
-  trailerText?: string;
-} {
-  const preserved = document.rawAst?.preservedSections as PreservedCtSections | undefined;
-  const hasPreservedCt = preserved?.kind === 'fluidsim-4.5-ct';
-
-  // Fast 100% lossless path when semantic content matches original parsed .ct file
-  if (hasPreservedCt && preserved.originalCtBody !== undefined) {
-    const currentFp = computeSemanticFingerprint(document);
-    if (currentFp === preserved.originalSemanticFingerprint) {
-      return {
-        headerLinesB64: preserved.headerLinesB64,
-        profile: preserved.profile,
-        previewBlockB64: preserved.previewBlockB64,
-        ...(preserved.fsPreviewBlock !== undefined ? { fsPreviewBlock: preserved.fsPreviewBlock } : {}),
-        ctBody: preserved.originalCtBody,
-        trailerText: preserved.trailerText,
-      };
-    }
-  }
-
-  // Ensure every component has non-overlapping layout coordinates before emitting .ct geometry
-  const workingDoc = document.components.some((c) => !c.layout)
-    ? autoLayoutCircuit(document, { incremental: true })
-    : document;
-
-  // Fresh or patched authoring path -> emit valid FluidSIM 4.5 .ct text objects, BEGINSYM symbols & connections
-  let nextObjId = 0;
-  const allocObjId = () => nextObjId++;
-
-  const symAlloc = new CtSymbolAllocator();
-  const objectBlocks: string[] = [];
-  const gateLines: string[] = [];
-  const connectionBlocks: string[] = [];
-
-  interface RawRect {
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
-  }
-  const occupiedRects: RawRect[] = [];
-  const labelCandidates: Array<{
-    compId: string;
-    compType: string;
-    label: string;
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
-  }> = [];
-
-  // Identify exhaust_silencer / blind_plug components attached to ANY pneumatic port -> embed as EX3 / EX4!
-  const embeddedExhaustByPort = new Map<string, { exhId: string; edgeId: string }>();
-  const embeddedPlugByPort = new Map<string, { plugId: string; edgeId: string }>();
-  const embeddedTerminatorCompIds = new Set<string>();
-  const embeddedTerminatorEdgeIds = new Set<string>();
-
-  const compById = new Map(workingDoc.components.map((c) => [c.id, c]));
-  const isTerminator = (t: string): boolean => t === 'exhaust_silencer' || t === 'blind_plug';
-
-  for (const edge of workingDoc.connections) {
-    const cFrom = compById.get(edge.from.componentId);
-    const cTo = compById.get(edge.to.componentId);
-    if (!cFrom || !cTo) continue;
-
-    if (cTo.type === 'exhaust_silencer' && !isTerminator(cFrom.type)) {
-      const key = `${cFrom.id}:${edge.from.port}`;
-      if (!embeddedExhaustByPort.has(key)) {
-        embeddedExhaustByPort.set(key, { exhId: cTo.id, edgeId: edge.id });
-        embeddedTerminatorCompIds.add(cTo.id);
-        embeddedTerminatorEdgeIds.add(edge.id);
-      }
-    } else if (cFrom.type === 'exhaust_silencer' && !isTerminator(cTo.type)) {
-      const key = `${cTo.id}:${edge.to.port}`;
-      if (!embeddedExhaustByPort.has(key)) {
-        embeddedExhaustByPort.set(key, { exhId: cFrom.id, edgeId: edge.id });
-        embeddedTerminatorCompIds.add(cFrom.id);
-        embeddedTerminatorEdgeIds.add(edge.id);
-      }
-    } else if (cTo.type === 'blind_plug' && !isTerminator(cFrom.type)) {
-      const key = `${cFrom.id}:${edge.from.port}`;
-      if (!embeddedPlugByPort.has(key)) {
-        embeddedPlugByPort.set(key, { plugId: cTo.id, edgeId: edge.id });
-        embeddedTerminatorCompIds.add(cTo.id);
-        embeddedTerminatorEdgeIds.add(edge.id);
-      }
-    } else if (cFrom.type === 'blind_plug' && !isTerminator(cTo.type)) {
-      const key = `${cTo.id}:${edge.to.port}`;
-      if (!embeddedPlugByPort.has(key)) {
-        embeddedPlugByPort.set(key, { plugId: cFrom.id, edgeId: edge.id });
-        embeddedTerminatorCompIds.add(cFrom.id);
-        embeddedTerminatorEdgeIds.add(edge.id);
-      }
-    }
-  }
-
-  // Exact FluidSIM 4.5 raw unrotated (baseW, baseH) matching pneumatics45.ts * 3072 & ctSymbolLibrary.ts
-  const getRawBaseSize = (compType: string): { baseW: number; baseH: number } => {
-    switch (compType) {
-      case 'air_source':
-        return { baseW: 18432, baseH: 18432 };
-      case 'air_service_unit':
-        return { baseW: 122880, baseH: 67584 };
-      case 'air_filter':
-      case 'air_reservoir':
-      case 'quick_exhaust_valve':
-      case 'pressure_regulator':
-      case 'pressure_gauge':
-        return { baseW: 24576, baseH: 24576 };
-      case 'pressure_switch_differential':
-        return { baseW: 52224, baseH: 24576 };
-      case 'vacuum_sucker':
-        return { baseW: 24576, baseH: 21504 };
-      case 'pneumatic_junction':
-      case 'electrical_junction':
-        return { baseW: 12288, baseH: 12288 };
-      case 'pneumatic_manifold':
-        return { baseW: 122880, baseH: 12288 };
-      case 'cylinder_single_acting':
-      case 'cylinder_double_acting':
-      case 'cylinder_rodless':
-        return { baseW: 57344, baseH: 32768 };
-      case 'swivel_drive':
-      case 'air_motor':
-        return { baseW: 30720, baseH: 39936 };
-      case 'vacuum_suction_nozzle':
-        return { baseW: 61440, baseH: 30720 };
-      case 'valve_2_2':
-      case 'valve_3_2':
-      case 'valve_4_2':
-      case 'time_delay_valve':
-      case 'pressure_sequence_valve':
-        return { baseW: 86016, baseH: 36864 };
-      case 'valve_5_2':
-        return { baseW: 110592, baseH: 36864 };
-      case 'valve_5_3':
-        return { baseW: 147456, baseH: 36864 };
-      case 'flow_control_one_way':
-      case 'throttle_valve':
-        return { baseW: 46080, baseH: 61440 };
-      case 'check_valve':
-      case 'check_valve_spring':
-      case 'pressure_relief_valve':
-        return { baseW: 12288, baseH: 24576 };
-      case 'shuttle_valve_or':
-      case 'dual_pressure_valve_and':
-        return { baseW: 24576, baseH: 18432 };
-      case 'power_24v':
-      case 'power_0v':
-        return { baseW: 18432, baseH: 12288 };
-      case 'pushbutton_no':
-      case 'pushbutton_nc':
-      case 'relay_contact_changeover':
-        return { baseW: 15360, baseH: 30720 };
-      case 'limit_switch_no':
-      case 'limit_switch_nc':
-      case 'proximity_switch_magnetic':
-      case 'relay_contact_no':
-      case 'relay_contact_nc':
-      case 'indicator_lamp':
-        return { baseW: 12288, baseH: 30720 };
-      case 'relay_coil':
-        return { baseW: 24576, baseH: 30720 };
-      case 'timer_relay_on_delay':
-      case 'timer_relay_off_delay':
-        return { baseW: 36864, baseH: 30720 };
-      case 'electrical_counter':
-        return { baseW: 43008, baseH: 30720 };
-      case 'valve_solenoid':
-        return { baseW: 39936, baseH: 30720 };
-      default: {
-        const def = getCatalogComponent(compType);
-        return {
-          baseW: Math.round((def?.defaultSize.width ?? 16) * FS_UNIT_PER_MM),
-          baseH: Math.round((def?.defaultSize.height ?? 12) * FS_UNIT_PER_MM),
-        };
-      }
-    }
-  };
-
-  // Map "<compId>:<portName>" -> FluidSIM port object ID
-  const portObjIdMap = new Map<string, number>();
-  const portObjMeta = new Map<
-    number,
-    { blockIdx: number; parentId: number; cls: string; cx: number; cy: number; hidden: boolean; hasL: boolean }
-  >();
-  const routingPorts = new Map<number, CtRoutingPort>();
-  const routingObstacles: CtRoutingObstacle[] = [];
-  const occupiedManifoldSliceXs: number[] = [];
-  const occupiedElecSliceXsByY: Array<{ x: number; y: number }> = [];
-  const manifoldBridges: Array<{ pA: number; pB: number }> = [];
-  const elecRailBridges: Array<{ pA: number; pB: number }> = [];
-  const edgePortOverride = new Map<string, number>();
-
-  for (const comp of workingDoc.components) {
-    if (embeddedTerminatorCompIds.has(comp.id)) continue;
-
-    const parentId = allocObjId();
-    const xMm = comp.layout?.x ?? 40;
-    const yMm = comp.layout?.y ?? 40;
-    const x1 = Math.max(4096, Math.round(xMm * FS_UNIT_PER_MM));
-    const y1 = Math.max(57344, Math.round(yMm * FS_UNIT_PER_MM));
-    const rot = normalizeRotation(comp.rotationDeg ?? comp.layout?.rotationDeg ?? 0);
-    const { baseW, baseH } = getRawBaseSize(comp.type);
-    const boxW = rot === 90 || rot === 270 ? baseH : baseW;
-    const boxH = rot === 90 || rot === 270 ? baseW : baseH;
-    const x2 = x1 + boxW;
-    const y2 = y1 + boxH;
-    const flip = comp.layout?.flipped ? 1 : 0;
-
-    occupiedRects.push({ x1, y1, x2, y2 });
-    if (comp.type !== 'pneumatic_manifold') {
-      const obsX2 =
-        comp.type === 'cylinder_double_acting' || comp.type === 'cylinder_single_acting'
-          ? x2 + 46080
-          : comp.type === 'pressure_switch_differential'
-            ? x2 + 24576
-            : x2;
-      routingObstacles.push({
-        ownerId: parentId,
-        cls: comp.type,
-        x1,
-        y1,
-        x2: obsX2,
-        y2,
-      });
-    }
-
-    const catDef = getCatalogComponent(comp.type);
-    const isPneumaticLabeled =
-      Boolean(comp.label && comp.label.trim().length > 0) &&
-      (catDef?.layoutLayer ?? 3) < 10 &&
-      comp.type !== 'pneumatic_manifold';
-    if (isPneumaticLabeled && comp.label) {
-      labelCandidates.push({
-        compId: comp.id,
-        compType: comp.type,
-        label: comp.label.trim(),
-        x1,
-        y1,
-        x2,
-        y2,
-      });
-    }
-
-    // Golden FluidSIM 4.5 port hitbox is 10240 x 10240 (+/-5120 around rotated port center)
-    const addPortObj = (
-      gateNum: number,
-      cls: 'PConnection' | 'EConnection' | 'UEConnection' | 'UMConnection',
-      portName?: string,
-      extraProps: string[] = [],
-      explicitRawOffset?: { x: number; y: number },
-    ): number => {
-      const pid = allocObjId();
-      let cx: number;
-      let cy: number;
-      if (explicitRawOffset) {
-        const rotOff = rotatePortOffset(explicitRawOffset, baseW, baseH, rot);
-        cx = x1 + Math.round(rotOff.x);
-        cy = y1 + Math.round(rotOff.y);
-      } else if (portName) {
-        const effOff = getEffectivePortOffset(comp, portName);
-        cx = x1 + Math.round(effOff.x * FS_UNIT_PER_MM);
-        cy = y1 + Math.round(effOff.y * FS_UNIT_PER_MM);
-      } else {
-        const rotOff = rotatePortOffset({ x: gateNum * 3072, y: 0 }, baseW, baseH, rot);
-        cx = x1 + Math.round(rotOff.x);
-        cy = y1 + Math.round(rotOff.y);
-      }
-      const px1 = cx - 5120;
-      const py1 = cy - 5120;
-      const px2 = cx + 5120;
-      const py2 = cy + 5120;
-      const lines = [
-        `${cls} O${pid} ${px1} ${py1} ${px2} ${py2} 0 0 348163`,
-        ...extraProps,
-      ];
-      const blockIdx = objectBlocks.length;
-      objectBlocks.push(lines.join('\n'));
-      gateLines.push(`gate${gateNum} # ${parentId} ${pid}`);
-      const hidden = extraProps.some((p) => p.includes('S state INT 4'));
-      portObjMeta.set(pid, { blockIdx, parentId, cls, cx, cy, hidden, hasL: false });
-      routingPorts.set(pid, { objId: pid, parentId, cls, cx, cy, hidden });
-      if (portName) {
-        portObjIdMap.set(`${comp.id}:${portName}`, pid);
-      }
-      return pid;
-    };
-
-    const pPortProps = (portName: string): string[] => {
-      const embedded = embeddedExhaustByPort.get(`${comp.id}:${portName}`);
-      if (embedded) {
-        return [
-          ' S ex_type_FEST B T',
-          ' S ex_type S EX3',
-          ' S R_H_FEST B T',
-          ' S R_H F 0',
-          ` S _MCP_EXH_ID S ${embedded.exhId}`,
-          ` S _MCP_EXH_EDGE_ID S ${embedded.edgeId}`,
-        ];
-      }
-      const plug = embeddedPlugByPort.get(`${comp.id}:${portName}`);
-      if (plug) {
-        return [
-          ' S ex_type_FEST B T',
-          ' S ex_type S EX4',
-          ' S R_H_FEST B T',
-          ' S R_H F 0',
-          ` S _MCP_PLUG_ID S ${plug.plugId}`,
-          ` S _MCP_PLUG_EDGE_ID S ${plug.edgeId}`,
-        ];
-      }
-      return [
-        ' S ex_type_FEST B T',
-        ' S ex_type S EX0',
-        ' S R_H_FEST B T',
-        ' S R_H F 0',
-      ];
-    };
-
-    const emitDistanceRule = (ownerComp: ComponentNode): void => {
-      if (!ownerComp.distanceRule || ownerComp.distanceRule.length === 0) return;
-      const drId = allocObjId();
-      const drX1 = x1 + 4096;
-      const drY1 = y1 - 28672;
-      const drX2 = x1 + 36864;
-      const drY2 = y1 - 17408;
-      occupiedRects.push({ x1: drX1, y1: drY1, x2: drX2, y2: drY2 });
-      routingObstacles.push({ ownerId: drId, cls: 'R_SCHALT', x1: drX1, y1: drY1, x2: drX2, y2: drY2 });
-      const drLines = [
-        `R_SCHALT O${drId} ${drX1} ${drY1} ${drX2} ${drY2} 0 0 4253703`,
-        ` S _MCP_OWNER_ID S ${ownerComp.id}`,
-      ];
-      ownerComp.distanceRule.forEach((m, idx) => {
-        drLines.push(` S label${idx} S ${m.label}`);
-        drLines.push(` S pos${idx} F ${m.positionMm}`);
-        drLines.push(` S pos_l_${idx} F ${m.positionMm}`);
-        drLines.push(` S pos_r_${idx} F ${m.positionMm}`);
-      });
-      objectBlocks.push(drLines.join('\n'));
-    };
-
-    const isPortWired = (portName: string): boolean =>
-      workingDoc.connections.some(
-        (e) =>
-          (e.from.componentId === comp.id && e.from.port === portName) ||
-          (e.to.componentId === comp.id && e.to.port === portName),
-      );
-
-    const addValvePilotPort = (gateNum: number, portName: string, side: 'L' | 'R'): void => {
-      const act = side === 'L' ? comp.leftActuation : comp.rightActuation;
-      const hidden = act?.type !== 'pneumatic_pilot' && !isPortWired(portName);
-      const props = pPortProps(portName);
-      if (hidden) props.push(' S state INT 4');
-      addPortObj(gateNum, 'PConnection', portName, props);
-    };
-
-    const emitValveActuationPorts = (startGate: number): void => {
-      const hasLeftSol = comp.leftActuation?.type === 'solenoid';
-      const hasRightSol = comp.rightActuation?.type === 'solenoid';
-      addPortObj(
-        startGate,
-        'UEConnection',
-        undefined,
-        hasLeftSol && comp.leftActuation?.label
-          ? [` S label S ${comp.leftActuation.label}`]
-          : [' S state INT 4'],
-        { x: -6144, y: 24576 },
-      );
-      addPortObj(
-        startGate + 1,
-        'UEConnection',
-        undefined,
-        hasRightSol && comp.rightActuation?.label
-          ? [` S label S ${comp.rightActuation.label}`]
-          : [' S state INT 4'],
-        { x: baseW + 6144, y: 24576 },
-      );
-      addPortObj(
-        startGate + 2,
-        'UMConnection',
-        undefined,
-        comp.leftActuation?.type === 'roller' && comp.leftActuation.label
-          ? [` S label S ${comp.leftActuation.label}`]
-          : [' S state INT 4'],
-        { x: 9216, y: 12288 },
-      );
-      addPortObj(
-        startGate + 3,
-        'UMConnection',
-        undefined,
-        comp.rightActuation?.type === 'roller' && comp.rightActuation.label
-          ? [` S label S ${comp.rightActuation.label}`]
-          : [' S state INT 4'],
-        { x: baseW - 9216, y: 12288 },
-      );
-    };
-
-    const idProp = ` S _MCP_ID S ${comp.id}`;
-    const labelProp = comp.label ? [` S _MCP_LABEL S ${comp.label}`] : [];
-    const elecLabelProp = comp.label ? [` S label S ${comp.label}`] : [];
-
-    switch (comp.type) {
-      case 'air_source': {
-        const pBar = Number(comp.params.pressureBar ?? 6);
-        const flow = Number(comp.params.maxFlowLMin ?? 1000);
-        objectBlocks.push(
-          [
-            `PPE1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 2908168`,
-            idProp,
-            ' S P_LIM_FEST B T',
-            ` S P_LIM F ${pBar}`,
-            ' S FLOW_FEST B T',
-            ` S FLOW F ${flow}`,
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '1', pPortProps('1'));
-        break;
-      }
-      case 'air_service_unit': {
-        const pBar = Number(comp.params.nominalPressureBar ?? 6);
-        const frlSym = symAlloc.alloc(buildWartungseinheit2Sym());
-        objectBlocks.push(
-          [
-            `Wartungseinheit2 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3527683`,
-            idProp,
-            ...labelProp,
-            ` S dxf_prim_list V ${frlSym}`,
-            ' S NN_FLOW_FEST B T',
-            ' S NN_FLOW F 750',
-            ' S P_SOLL_FEST B T',
-            ` S P_SOLL F ${pBar}`,
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '1', pPortProps('1'));
-        addPortObj(2, 'PConnection', '2', pPortProps('2'));
-        break;
-      }
-      case 'pneumatic_junction': {
-        objectBlocks.push(
-          [`PTriconnection O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4311043`, idProp].join('\n'),
-        );
-        const juncEdges = workingDoc.connections.filter(
-          (e) =>
-            !embeddedTerminatorEdgeIds.has(e.id) &&
-            (e.from.componentId === comp.id || e.to.componentId === comp.id),
-        );
-        for (let g = 1; g <= 4; g++) {
-          const edge = juncEdges[g - 1];
-          if (edge) {
-            const side: 'from' | 'to' = edge.from.componentId === comp.id ? 'from' : 'to';
-            const origPort = side === 'from' ? edge.from.port : edge.to.port;
-            const pid = addPortObj(g, 'PConnection', String(g), [
-              ...pPortProps(origPort),
-              ` S _MCP_ELEC_RAIL_PORT S ${origPort}`,
-            ]);
-            edgePortOverride.set(`${edge.id}:${side}`, pid);
-          } else {
-            const pName = String(g);
-            const props = pPortProps(pName);
-            const hasTerminator =
-              embeddedExhaustByPort.has(`${comp.id}:${pName}`) ||
-              embeddedPlugByPort.has(`${comp.id}:${pName}`);
-            if (!hasTerminator) {
-              props.push(' S state INT 4');
-            }
-            addPortObj(g, 'PConnection', pName, props);
-          }
-        }
-        break;
-      }
-      case 'pneumatic_manifold': {
-        // FluidSIM 4.5 C++ loader requires EVERY PTriconnection to have EXACTLY 4 PConnection gates
-        // centered at (sliceX1 + 6144, y1 + 6144). Align one 4-gate slice directly beneath each connected
-        // riser port so vertical supply/exhaust risers drop cleanly straight down with zero horizontal jogs.
-        const busRole = String(comp.params.busRole ?? 'supply');
-        const centerY = y1 + 6144;
-
-        // Collect external connections targeting ports '2'..'7' (and non-terminator '1'/'8')
-        const riserItems: Array<{ portName: string; targetX: number }> = [];
-        for (const pName of ['2', '3', '4', '5', '6', '7']) {
-          const edge = workingDoc.connections.find(
-            (e) =>
-              !embeddedTerminatorEdgeIds.has(e.id) &&
-              ((e.from.componentId === comp.id && e.from.port === pName) ||
-                (e.to.componentId === comp.id && e.to.port === pName)),
-          );
-          if (!edge) continue;
-          const otherId = edge.from.componentId === comp.id ? edge.to.componentId : edge.from.componentId;
-          const otherPort = edge.from.componentId === comp.id ? edge.to.port : edge.from.port;
-          const otherComp = compById.get(otherId);
-          if (!otherComp?.layout) continue;
-          const off = getEffectivePortOffset(otherComp, otherPort);
-          riserItems.push({
-            portName: pName,
-            targetX: Math.round((otherComp.layout.x + off.x) * FS_UNIT_PER_MM),
-          });
-        }
-        riserItems.sort((a, b) => a.targetX - b.targetX);
-
-        // Fallback if manifold has <= 1 risers: keep canonical 3-slice layout
-        const minSliceGap = 24576; // 8 mm minimum spacing between PTriconnection centers
-        const maxRightRaw = Math.round(
-          ((workingDoc.metadata.sheetWidthMm >= 400 ? 350 : 250) * FS_UNIT_PER_MM),
-        );
-
-        const slicePlans: Array<{ sliceX1: number; ports: Array<string | undefined> }> = [];
-        if (riserItems.length >= 2) {
-          let cursorX = x1;
-          for (let i = 0; i < riserItems.length; i++) {
-            const item = riserItems[i];
-            let desiredX1 = Math.min(maxRightRaw - 12288, Math.max(cursorX, item.targetX - 6144));
-            while (
-              occupiedManifoldSliceXs.some((ox) => Math.abs(desiredX1 + 6144 - ox) < 15360) &&
-              desiredX1 + 15360 <= maxRightRaw - 12288
-            ) {
-              desiredX1 += 15360;
-            }
-            if (i === 0) {
-              // Slice 0 carries port '1' on gate1, first riser on gate2, unused on gate3, bridgeOut on gate4
-              slicePlans.push({ sliceX1: desiredX1, ports: ['1', item.portName, undefined, undefined] });
-            } else if (i === riserItems.length - 1) {
-              // Last slice carries bridgeIn on gate1, last riser on gate2, unused on gate3, port '8' on gate4
-              slicePlans.push({ sliceX1: desiredX1, ports: [undefined, item.portName, undefined, '8'] });
-            } else {
-              slicePlans.push({ sliceX1: desiredX1, ports: [undefined, item.portName, undefined, undefined] });
-            }
-            cursorX = desiredX1 + minSliceGap;
-          }
-          // Ensure any remaining unreferenced ports ('2'..'7') still map if someone queries them
-        } else {
-          slicePlans.push(
-            { sliceX1: x1, ports: ['1', '2', '3', undefined] },
-            { sliceX1: x1 + 55296, ports: [undefined, '4', '5', undefined] },
-            { sliceX1: x1 + 110592, ports: [undefined, '6', '7', '8'] },
-          );
-        }
-
-        const addSlicePort = (
-          sliceParentId: number,
-          gateNum: number,
-          rawCx: number,
-          rawCy: number,
-          portName?: string,
-          extraProps: string[] = [],
-        ): number => {
-          const pid = allocObjId();
-          const px1 = rawCx - 5120;
-          const py1 = rawCy - 5120;
-          const px2 = rawCx + 5120;
-          const py2 = rawCy + 5120;
-          const blockIdx = objectBlocks.length;
-          objectBlocks.push([`PConnection O${pid} ${px1} ${py1} ${px2} ${py2} 0 0 348163`, ...extraProps].join('\n'));
-          gateLines.push(`gate${gateNum} # ${sliceParentId} ${pid}`);
-          const hidden = extraProps.some((p) => p.includes('S state INT 4'));
-          portObjMeta.set(pid, {
-            blockIdx,
-            parentId: sliceParentId,
-            cls: 'PConnection',
-            cx: rawCx,
-            cy: rawCy,
-            hidden,
-            hasL: false,
-          });
-          routingPorts.set(pid, {
-            objId: pid,
-            parentId: sliceParentId,
-            cls: 'PConnection',
-            cx: rawCx,
-            cy: rawCy,
-            hidden,
-          });
-          if (portName) {
-            portObjIdMap.set(`${comp.id}:${portName}`, pid);
-          }
-          return pid;
-        };
-
-        const sliceMeta = (sliceIdx: number): string[] => [
-          ` S _MCP_MANIFOLD_ID S ${comp.id}`,
-          ` S _MCP_MANIFOLD_ROLE S ${busRole}`,
-          ` S _MCP_MANIFOLD_SLICE I ${sliceIdx}`,
-          ...(sliceIdx === 0 ? labelProp : []),
-        ];
-
-        const unusedPortProps = [
-          ' S ex_type_FEST B T',
-          ' S ex_type S EX0',
-          ' S R_H_FEST B T',
-          ' S R_H F 0',
-          ' S state INT 4',
-        ];
-        const bridgePortProps = [
-          ' S ex_type_FEST B T',
-          ' S ex_type S EX0',
-          ' S R_H_FEST B T',
-          ' S R_H F 0',
-        ];
-
-        let prevBridgeOut: number | undefined;
-        for (let sIdx = 0; sIdx < slicePlans.length; sIdx++) {
-          const sp = slicePlans[sIdx];
-          const sObjId = sIdx === 0 ? parentId : allocObjId();
-          const cx = sp.sliceX1 + 6144;
-          occupiedManifoldSliceXs.push(cx);
-          occupiedRects.push({ x1: sp.sliceX1, y1, x2: sp.sliceX1 + 12288, y2: y1 + 12288 });
-          routingObstacles.push({
-            ownerId: sObjId,
-            cls: 'PTriconnection',
-            x1: sp.sliceX1,
-            y1,
-            x2: sp.sliceX1 + 12288,
-            y2: y1 + 12288,
-          });
-          objectBlocks.push(
-            [
-              `PTriconnection O${sObjId} ${sp.sliceX1} ${y1} ${sp.sliceX1 + 12288} ${y1 + 12288} ${rot} ${flip} 4311043`,
-              ...sliceMeta(sIdx),
-            ].join('\n'),
-          );
-
-          let curBridgeOut: number | undefined;
-          for (let g = 1; g <= 4; g++) {
-            const pName = sp.ports[g - 1];
-            const isBridgeIn = sIdx > 0 && g === 1;
-            const isBridgeOut = sIdx < slicePlans.length - 1 && g === 4;
-            if (isBridgeIn) {
-              const bIn = addSlicePort(sObjId, g, cx, centerY, undefined, bridgePortProps);
-              if (prevBridgeOut !== undefined) {
-                manifoldBridges.push({ pA: prevBridgeOut, pB: bIn });
-              }
-            } else if (isBridgeOut) {
-              curBridgeOut = addSlicePort(sObjId, g, cx, centerY, undefined, bridgePortProps);
-            } else if (pName) {
-              addSlicePort(sObjId, g, cx, centerY, pName, [
-                ...pPortProps(pName),
-                ` S _MCP_MANIFOLD_PORT S ${pName}`,
-              ]);
-            } else {
-              addSlicePort(sObjId, g, cx, centerY, undefined, unusedPortProps);
-            }
-          }
-          prevBridgeOut = curBridgeOut;
-        }
-        break;
-      }
-      case 'vacuum_suction_nozzle': {
-        const vacuumBar = Number(comp.params.vacuumBar ?? -0.7);
-        const minSupplyBar = Number(comp.params.minSupplyBar ?? 3.0);
-        const visualRot = rot === 0 ? 180 : rot;
-        const exh3 = embeddedExhaustByPort.get(`${comp.id}:3`);
-        const hasNonExhPort3 =
-          !exh3 &&
-          workingDoc.connections.some(
-            (e) =>
-              (e.from.componentId === comp.id && e.from.port === '3') ||
-              (e.to.componentId === comp.id && e.to.port === '3'),
-          );
-        objectBlocks.push(
-          [
-            `PAV1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${visualRot} ${flip} 4495368`,
-            idProp,
-            ...labelProp,
-            ...(rot !== visualRot ? [` S _MCP_ORIG_ROT I ${rot}`] : []),
-            ' S FLIPPED I 1',
-            ' F con_descr1 x_offset I -4',
-            ' F con_descr1 y_offset I -9',
-            ' F con_descr2 x_offset I 11',
-            ' F con_descr2 y_offset I 4',
-            ` S _MCP_VAC_BAR F ${vacuumBar}`,
-            ` S _MCP_MIN_SUP F ${minSupplyBar}`,
-            ...(exh3
-              ? [` S _MCP_EXH_3_ID S ${exh3.exhId}`, ` S _MCP_EXH_3_EDGE_ID S ${exh3.edgeId}`]
-              : []),
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '1', pPortProps('1'));
-        if (hasNonExhPort3) {
-          addPortObj(2, 'PConnection', '3', pPortProps('3'));
-          addPortObj(3, 'PConnection', '1v', pPortProps('1v'));
-        } else {
-          addPortObj(2, 'PConnection', '1v', pPortProps('1v'));
-        }
-        break;
-      }
-      case 'vacuum_sucker': {
-        const gripThresholdBar = Number(comp.params.gripThresholdBar ?? -0.3);
-        objectBlocks.push(
-          [
-            `PAV1S O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4894728`,
-            idProp,
-            ...labelProp,
-            ' F con_descr1 x_offset I -10',
-            ' F con_descr1 y_offset I 4',
-            ` S _MCP_GRIP_BAR F ${gripThresholdBar}`,
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '1v', pPortProps('1v'));
-        break;
-      }
-      case 'swivel_drive': {
-        const maxAngleDeg = Number(comp.params.maxAngleDeg ?? 180);
-        const initDeg = Number(comp.params.initialAngleDeg ?? 0);
-        const torqueNm = Number(comp.params.torqueNm ?? 5);
-        const loadNm = Number(comp.params.externalLoadNm ?? 0);
-        const visualRot = rot === 0 ? 90 : rot;
-        const l1Label = comp.distanceRule?.[0]?.label ?? '';
-        const l2Label = comp.distanceRule?.[1]?.label ?? '';
-        const drB64 =
-          comp.distanceRule && comp.distanceRule.length > 0
-            ? Buffer.from(JSON.stringify(comp.distanceRule), 'utf8').toString('base64')
-            : '';
-        objectBlocks.push(
-          [
-            `PAR1b O${parentId} ${x1} ${y1} ${x2} ${y2} ${visualRot} ${flip} 4628483`,
-            idProp,
-            ...labelProp,
-            ...(rot !== visualRot ? [` S _MCP_ORIG_ROT I ${rot}`] : []),
-            ' S ALPHA_FEST B T',
-            ` S ALPHA F ${maxAngleDeg}`,
-            ' S S_RESET_FEST B T',
-            ' S S_RESET F 0',
-            ' S S_FEST B T',
-            ' S S F 0',
-            ' S V_S_FEST B T',
-            ' S V_S F 0.1',
-            ' S FF_FEST B T',
-            ' S FF F 0.1',
-            ' S M_EXT_FEST B T',
-            ' S M_EXT F 0',
-            ' S MOI_FEST B T',
-            ' S MOI F 0.0001',
-            ' F con_descr1 x_offset I 2',
-            ' F con_descr1 y_offset I -10',
-            ' F con_descr2 x_offset I 2',
-            ' F con_descr2 y_offset I 12',
-            ' F label_pos x_offset I 0',
-            ' F label_pos y_offset I 0',
-            ' F label_pos2 x_offset I 0',
-            ' F label_pos2 y_offset I 0',
-            ...(l1Label ? [` S l1 S ${l1Label}`] : []),
-            ...(l2Label ? [` S l2 S ${l2Label}`] : []),
-            ...(drB64 ? [` S _MCP_DR_JSON S ${drB64}`] : []),
-            ...(initDeg !== 0 ? [` S _MCP_INIT_DEG F ${initDeg}`] : []),
-            ...(torqueNm !== 5 ? [` S _MCP_TORQUE F ${torqueNm}`] : []),
-            ...(loadNm !== 0 ? [` S _MCP_LOAD_NM F ${loadNm}`] : []),
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', 'A', pPortProps('A'), { x: 6144, y: 36864 });
-        addPortObj(2, 'PConnection', 'B', pPortProps('B'), { x: 24576, y: 36864 });
-        break;
-      }
-      case 'cylinder_single_acting':
-      case 'cylinder_double_acting': {
-        const isSac = comp.type === 'cylinder_single_acting';
-        const stroke = Number(comp.params.strokeMm ?? (isSac ? 50 : 100));
-        const bore = Number(comp.params.pistonDiameterMm ?? (isSac ? 20 : 25));
-        const rod = Number(comp.params.rodDiameterMm ?? 10);
-        const areaCap = Number((Math.PI * Math.pow(bore / 20, 2)).toFixed(5));
-        const areaRing = Number(Math.max(0.05, areaCap - Math.PI * Math.pow(rod / 20, 2)).toFixed(5));
-        const extLoad = Number(comp.params.externalLoadN ?? 0);
-        const initPos = Number(comp.params.initialPositionMm ?? 0);
-        const springForceN = Number(comp.params.springForceN ?? 25);
-        const cushioning = comp.params.cushioning !== false;
-        const cylSyms = buildCylinderSyms(isSac);
-        const bodySym = symAlloc.alloc(cylSyms.body);
-        const rodSym = symAlloc.alloc(cylSyms.rod);
-        // Reserve piston rod overhang to the right so labels never touch the rod
-        occupiedRects.push({ x1: x2, y1, x2: x2 + 46080, y2 });
-        const lines = [
-          `CylDGPPAB O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4986883`,
-          idProp,
-          ...labelProp,
-          ` S dxf_prim_list V ${bodySym}`,
-          ' S description_FEST B T',
-          ` S description S ${isSac ? 'Zylinder, einfachwirkend' : 'Zylinder, doppeltwirkend'}`,
-          ' S ALPHA_FEST B T',
-          ' S ALPHA F 0',
-          ' S FRICTION_FEST B T',
-          ' S FRICTION F 0',
-          ' S FRICTION_BA_FEST B T',
-          ' S FRICTION_BA F 0',
-          ' S FRICTION_SEL I 0',
-          ' S GLEAK_FEST B T',
-          ' S GLEAK F 0',
-          ' S MASS_FEST B T',
-          ' S MASS F 0',
-          ' S A_K_RIGHT_FEST B T',
-          ' S A_K_RIGHT F -1',
-          ' S A_R_LEFT_FEST B T',
-          ' S A_R_LEFT F -1',
-          ' S piston_FEST B T',
-          ' S piston S CP_CA',
-          ' F piston x_pos I 0',
-          ' F piston y_pos I -8',
-          ' F piston stroke I 38',
-          ' F piston length I 74',
-          ' F piston f_offset_x I 7',
-          ' F piston f_offset_y I -3',
-          ' F piston only_top_rule B FALSE',
-          ' F piston both_sides_rule B FALSE',
-          ' S MoName_FEST B T',
-          ` S MoName S ${isSac ? 'Pneu.Actuator.CylinderSA' : 'Pneu.Actuator.CylinderDA'}`,
-          ` S dxf_prim_list2 V ${rodSym}`,
-          ' S F_FEST B T',
-          ` S F F ${extLoad}`,
-          ' S S_RESET_FEST B T',
-          ` S S_RESET F ${initPos}`,
-          ' S S_FEST B T',
-          ` S S F ${initPos}`,
-          ' S HUB_FEST B T',
-          ` S HUB F ${stroke}`,
-          ' S A_K_FEST B T',
-          ` S A_K F ${areaCap}`,
-          ' S A_R_FEST B T',
-          ` S A_R F ${areaRing}`,
-          ' S CONSTANT_FORCE B T',
-          ' S FORCE_PROFILE_FEST B T',
-          ' S FORCE_PROFILE S 0 0;5000 0;',
-          ' S SENSING B T',
-          ' S SLEDGE B F',
-          ' S PISTON_COUNT I 1',
-          ' S PISTON_R B T',
-          ...(isSac
-            ? [' S SPRING_R B T', ...(springForceN !== 25 ? [` S _MCP_SPRING_N F ${springForceN}`] : [])]
-            : cushioning
-              ? [' S DAMPING_ADJ_R B T', ' S DAMPING_ADJ_L B T', ' S DAMPING_R B T', ' S DAMPING_L B T']
-              : []),
-        ];
-        objectBlocks.push(lines.join('\n'));
-        addPortObj(1, 'PConnection', 'A', pPortProps('A'), { x: 4096, y: 32768 });
-        if (!isSac) {
-          addPortObj(2, 'PConnection', 'B', pPortProps('B'), { x: 53248, y: 32768 });
-        }
-        emitDistanceRule(comp);
-        break;
-      }
-      case 'air_filter': {
-        const flow = Number(comp.params.nominalFlowLMin ?? 500);
-        const fltSym = symAlloc.alloc(buildFilterSym());
-        objectBlocks.push(
-          [
-            `FilterP O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3527683`,
-            idProp,
-            ...labelProp,
-            ` S dxf_prim_list V ${fltSym}`,
-            ' S NN_FLOW_FEST B T',
-            ` S NN_FLOW F ${flow}`,
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '1', pPortProps('1'));
-        addPortObj(2, 'PConnection', '2', pPortProps('2'));
-        break;
-      }
-      case 'valve_2_2': {
-        const flow = Number(comp.params.nominalFlowLMin ?? 200);
-        const isNO = comp.params.normalState === 'NO' || comp.params.normallyOpen === true;
-        const vSym = symAlloc.alloc(
-          buildValveSym('valve_2_2', {
-            leftActuation: comp.leftActuation,
-            rightActuation: comp.rightActuation,
-            normallyOpen: isNO,
-          }),
-        );
-        const vFlip = comp.layout?.flipped ? 1 : -18432;
-        objectBlocks.push(
-          [
-            `WV_2 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${vFlip} 1617923`,
-            idProp,
-            ...labelProp,
-            ` S dxf_prim_list V ${vSym}`,
-            ' S description_FEST B T',
-            ' S description S 2/n Way Valve',
-            ' S BODY_COUNT I 2',
-            ` S NN_FLOW F ${flow}`,
-            ...(isNO
-              ? [
-                  ' S _MCP_NORMAL_STATE S NO',
-                  ' S SWITCHED_POS_FEST B T',
-                  ' S SWITCHED_POS S (1\tC2C)',
-                  ' S SWITCHED_POS_R_FEST B T',
-                  ' S SWITCHED_POS_R S (2\tC2P)',
-                ]
-              : [
-                  ' S SWITCHED_POS_FEST B T',
-                  ' S SWITCHED_POS S (1\tC2P)',
-                  ' S SWITCHED_POS_R_FEST B T',
-                  ' S SWITCHED_POS_R S (2\tC2C)',
-                ]),
-            ...getFluidSimActuationProps('L', comp.leftActuation),
-            ...getFluidSimActuationProps('R', comp.rightActuation),
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '2', pPortProps('2'));
-        addPortObj(2, 'PConnection', '1', pPortProps('1'));
-        addValvePilotPort(3, '12', 'L');
-        addValvePilotPort(4, '10', 'R');
-        emitValveActuationPorts(5);
-        break;
-      }
-      case 'valve_3_2': {
-        const flow = Number(comp.params.nominalFlowLMin ?? 120);
-        const isNO = comp.params.normalState === 'NO' || comp.params.normallyOpen === true;
-        const vSym = symAlloc.alloc(
-          buildValveSym('valve_3_2', {
-            leftActuation: comp.leftActuation,
-            rightActuation: comp.rightActuation,
-            normallyOpen: isNO,
-          }),
-        );
-        const vFlip = comp.layout?.flipped ? 1 : -18432;
-        objectBlocks.push(
-          [
-            `WV_3 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${vFlip} 1617923`,
-            idProp,
-            ...labelProp,
-            ` S dxf_prim_list V ${vSym}`,
-            ' S description_FEST B T',
-            ' S description S 3/n Way Valve',
-            ' S BODY_COUNT I 2',
-            ` S NN_FLOW F ${flow}`,
-            ...(isNO
-              ? [
-                  ' S _MCP_NORMAL_STATE S NO',
-                  ' S SWITCHED_POS_FEST B T',
-                  ' S SWITCHED_POS S (1\tC3C)',
-                  ' S SWITCHED_POS_R_FEST B T',
-                  ' S SWITCHED_POS_R S (2\tC3P)',
-                ]
-              : [
-                  ' S SWITCHED_POS_FEST B T',
-                  ' S SWITCHED_POS S (1\tC3P)',
-                  ' S SWITCHED_POS_R_FEST B T',
-                  ' S SWITCHED_POS_R S (2\tC3C)',
-                ]),
-            ...getFluidSimActuationProps('L', comp.leftActuation),
-            ...getFluidSimActuationProps('R', comp.rightActuation),
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '2', pPortProps('2'));
-        addPortObj(2, 'PConnection', '1', pPortProps('1'));
-        addPortObj(3, 'PConnection', '3', pPortProps('3'));
-        addValvePilotPort(4, '12', 'L');
-        addValvePilotPort(5, '10', 'R');
-        emitValveActuationPorts(6);
-        break;
-      }
-      case 'valve_4_2': {
-        const flow = Number(comp.params.nominalFlowLMin ?? 400);
-        const initialState = comp.params.initialState === 'left' ? 'left' : 'right';
-        const vSym = symAlloc.alloc(
-          buildValveSym('valve_4_2', {
-            leftActuation: comp.leftActuation,
-            rightActuation: comp.rightActuation,
-          }),
-        );
-        const vFlip = comp.layout?.flipped ? 1 : -18432;
-        objectBlocks.push(
-          [
-            `WV_4 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${vFlip} 5109763`,
-            idProp,
-            ...labelProp,
-            ` S dxf_prim_list V ${vSym}`,
-            ' S description_FEST B T',
-            ' S description S 4/n Way Valve',
-            ' S BODY_COUNT I 2',
-            ` S NN_FLOW F ${flow}`,
-            ...(initialState === 'left' ? [' S _MCP_INITIAL_STATE S left'] : []),
-            ...getFluidSimActuationProps('L', comp.leftActuation),
-            ...getFluidSimActuationProps('R', comp.rightActuation),
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '4', pPortProps('4'));
-        addPortObj(2, 'PConnection', '2', pPortProps('2'));
-        addPortObj(3, 'PConnection', '1', pPortProps('1'));
-        addPortObj(4, 'PConnection', '3', pPortProps('3'));
-        addValvePilotPort(5, '14', 'L');
-        addValvePilotPort(6, '12', 'R');
-        emitValveActuationPorts(7);
-        break;
-      }
-      case 'valve_5_2':
-      case 'valve_5_3': {
-        const flow = Number(comp.params.nominalFlowLMin ?? 500);
-        const bodyCount = comp.type === 'valve_5_3' ? 3 : 2;
-        const initialState = comp.params.initialState === 'left' ? 'left' : 'right';
-        const centerType = String(comp.params.centerType ?? 'closed');
-        const vSym = symAlloc.alloc(
-          buildValveSym(comp.type, {
-            leftActuation: comp.leftActuation,
-            rightActuation: comp.rightActuation,
-            centerType,
-          }),
-        );
-        const vFlip = comp.layout?.flipped ? 1 : -30720;
-        objectBlocks.push(
-          [
-            `WV_5 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${vFlip} 5109763`,
-            idProp,
-            ...labelProp,
-            ` S dxf_prim_list V ${vSym}`,
-            ' S description_FEST B T',
-            ' S description S 5/n Way Valve',
-            ` S BODY_COUNT I ${bodyCount}`,
-            ` S NN_FLOW F ${flow}`,
-            ...(bodyCount === 2 && initialState === 'left' ? [' S _MCP_INITIAL_STATE S left'] : []),
-            ...(bodyCount === 3 && centerType !== 'closed' ? [` S _MCP_CENTER_TYPE S ${centerType}`] : []),
-            ...getFluidSimActuationProps('L', comp.leftActuation),
-            ...getFluidSimActuationProps('R', comp.rightActuation),
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '4', pPortProps('4'));
-        addPortObj(2, 'PConnection', '2', pPortProps('2'));
-        addPortObj(3, 'PConnection', '5', pPortProps('5'));
-        addPortObj(4, 'PConnection', '1', pPortProps('1'));
-        addPortObj(5, 'PConnection', '3', pPortProps('3'));
-        addValvePilotPort(6, '14', 'L');
-        addValvePilotPort(7, '12', 'R');
-        emitValveActuationPorts(8);
-        break;
-      }
-      case 'flow_control_one_way': {
-        const openingPct = Number(comp.params.openingPct ?? 50);
-        const freeFlow = comp.params.freeFlowDirection === '2_to_1' ? '2_to_1' : '1_to_2';
-        const fcSym = symAlloc.alloc(buildFlowControlOneWaySym(rot, freeFlow));
-        objectBlocks.push(
-          [
-            `DRSV2_pneu O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 6940243`,
-            idProp,
-            ...labelProp,
-            ` S dxf_prim_list V ${fcSym}`,
-            ' S LEVEL_FEST B T',
-            ` S LEVEL F ${openingPct}`,
-            ' S NN_FLOW_FEST B T',
-            ' S NN_FLOW F 100',
-            ...(freeFlow === '2_to_1' ? [' S _MCP_FREE_FLOW S 2_to_1'] : []),
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '1', pPortProps('1'));
-        addPortObj(2, 'PConnection', '2', pPortProps('2'));
-        break;
-      }
-      case 'throttle_valve': {
-        const openingPct = Number(comp.params.openingPct ?? 50);
-        const paramsB64 = Buffer.from(JSON.stringify(comp.params), 'utf8').toString('base64');
-        const thSym = symAlloc.alloc(buildThrottleValveSym());
-        objectBlocks.push(
-          [
-            `DRSV2_pneu O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 6940243`,
-            idProp,
-            ' S _MCP_TYPE S throttle_valve',
-            ` S _MCP_PARAMS S ${paramsB64}`,
-            ...labelProp,
-            ` S dxf_prim_list V ${thSym}`,
-            ' S LEVEL_FEST B T',
-            ` S LEVEL F ${openingPct}`,
-            ' S NN_FLOW_FEST B T',
-            ' S NN_FLOW F 100',
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '1', pPortProps('1'));
-        addPortObj(2, 'PConnection', '2', pPortProps('2'));
-        break;
-      }
-      case 'quick_exhaust_valve': {
-        const qeSym = symAlloc.alloc(buildQuickExhaustSym());
-        objectBlocks.push(
-          [
-            `DV_P1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 6940243`,
-            idProp,
-            ...labelProp,
-            ` S dxf_prim_list V ${qeSym}`,
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '1', pPortProps('1'));
-        addPortObj(2, 'PConnection', '2', pPortProps('2'));
-        addPortObj(3, 'PConnection', '3', pPortProps('3'));
-        break;
-      }
-      case 'check_valve': {
-        const crack = Number(comp.params.crackingPressureBar ?? 0.1);
-        const chkSyms = buildCheckValveSyms(false);
-        const closedSym = symAlloc.alloc(chkSyms.closed);
-        const openSym = symAlloc.alloc(chkSyms.open);
-        objectBlocks.push(
-          [
-            `CheckValveP O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 6940243`,
-            idProp,
-            ...labelProp,
-            ` S dxf_prim_list V ${closedSym}`,
-            ` S dxf_prim_list2 V ${openSym}`,
-            ` S P_V F ${crack}`,
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '1', pPortProps('1'));
-        addPortObj(2, 'PConnection', '2', pPortProps('2'));
-        break;
-      }
-      case 'check_valve_spring': {
-        const crack = Number(comp.params.crackingPressureBar ?? 0.3);
-        const hasPilot12 = workingDoc.connections.some(
-          (e) =>
-            (e.from.componentId === comp.id && e.from.port === '12') ||
-            (e.to.componentId === comp.id && e.to.port === '12'),
-        );
-        const cls = hasPilot12 ? 'CheckValvePilotOperatedSpringLoadedP' : 'CheckValveSpringLoadedP';
-        const chkSyms = buildCheckValveSyms(true);
-        const closedSym = symAlloc.alloc(chkSyms.closed);
-        const openSym = symAlloc.alloc(chkSyms.open);
-        objectBlocks.push(
-          [
-            `${cls} O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 6940243`,
-            idProp,
-            ...labelProp,
-            ` S dxf_prim_list V ${closedSym}`,
-            ` S dxf_prim_list2 V ${openSym}`,
-            ` S P_V F ${crack}`,
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '1', pPortProps('1'));
-        addPortObj(2, 'PConnection', '2', pPortProps('2'));
-        if (hasPilot12) {
-          addPortObj(3, 'PConnection', '12', pPortProps('12'));
-        }
-        break;
-      }
-      case 'shuttle_valve_or': {
-        const orSym = symAlloc.alloc(buildShuttleValveOrSym());
-        objectBlocks.push(
-          [
-            `PVS3 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4311043`,
-            idProp,
-            ...labelProp,
-            ` S dxf_prim_list V ${orSym}`,
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '1', pPortProps('1'));
-        addPortObj(2, 'PConnection', '1_2', pPortProps('1_2'));
-        addPortObj(3, 'PConnection', '2', pPortProps('2'));
-        break;
-      }
-      case 'dual_pressure_valve_and': {
-        const andSym = symAlloc.alloc(buildDualPressureAndSym());
-        objectBlocks.push(
-          [
-            `DRSV2_pneu O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4311043`,
-            idProp,
-            ...labelProp,
-            ` S dxf_prim_list V ${andSym}`,
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '1', pPortProps('1'));
-        addPortObj(2, 'PConnection', '1_2', pPortProps('1_2'));
-        addPortObj(3, 'PConnection', '2', pPortProps('2'));
-        break;
-      }
-      case 'pressure_regulator': {
-        const setBar = Number(comp.params.setPressureBar ?? 4.0);
-        const regSym = symAlloc.alloc(buildPressureRegulatorSym());
-        objectBlocks.push(
-          [
-            `PressureReducingValve3WaysAdjustableP O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3527683`,
-            idProp,
-            ...labelProp,
-            ` S dxf_prim_list V ${regSym}`,
-            ' S P_SOLL_FEST B T',
-            ` S P_SOLL F ${setBar}`,
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', '1', pPortProps('1'));
-        addPortObj(2, 'PConnection', '2', pPortProps('2'));
-        break;
-      }
-      case 'pressure_switch_differential': {
-        const pBar = Number(comp.params.pressureBar ?? -0.5);
-        const hyst = Number(comp.params.hysteresisBar ?? 0.05);
-        const trigMode = String(comp.params.triggerMode ?? 'auto');
-        objectBlocks.push(
-          [
-            `PSW1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 2938888`,
-            idProp,
-            ...labelProp,
-            ' S P_SOLL_FEST B T',
-            ` S P_SOLL F ${pBar}`,
-            ` S _MCP_HYST F ${hyst}`,
-            ...(trigMode !== 'auto' ? [` S _MCP_TRIG_MODE S ${trigMode}`] : []),
-          ].join('\n'),
-        );
-        addPortObj(1, 'PConnection', 'P1', pPortProps('P1'));
-        if (isPortWired('P2')) {
-          addPortObj(2, 'PConnection', 'P2', pPortProps('P2'));
-        }
-        break;
-      }
-      case 'power_24v':
-      case 'power_0v':
-      case 'electrical_junction': {
-        const compEdges = workingDoc.connections.filter(
-          (e) =>
-            !embeddedTerminatorEdgeIds.has(e.id) &&
-            (e.from.componentId === comp.id || e.to.componentId === comp.id),
-        );
-        const needElecRail =
-          comp.type === 'electrical_junction' ? compEdges.length >= 3 : compEdges.length >= 2;
-
-        if (!needElecRail) {
-          if (comp.type === 'power_24v') {
-            objectBlocks.push(
-              [`pol2 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4126728`, idProp].join('\n'),
-            );
-            addPortObj(1, 'EConnection', 'OUT', [], { x: 18432, y: 6144 });
-          } else if (comp.type === 'power_0v') {
-            objectBlocks.push(
-              [`pol1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 184328`, idProp].join('\n'),
-            );
-            addPortObj(1, 'EConnection', 'IN', [], { x: 18432, y: 6144 });
-          } else {
-            objectBlocks.push(
-              [`ETriconnection O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4321283`, idProp].join('\n'),
-            );
-            for (let g = 1; g <= 4; g++) {
-              const pName = String(g);
-              addPortObj(g, 'EConnection', pName, isPortWired(pName) ? [] : [' S state INT 4']);
-            }
-          }
-          break;
-        }
-
-        let startBridgePortId: number | undefined;
-        let railCenterY = y1 + 6144;
-        let railStartX = x1;
-
-        if (comp.type === 'power_24v') {
-          objectBlocks.push(
-            [`pol2 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4126728`, idProp].join('\n'),
-          );
-          startBridgePortId = addPortObj(1, 'EConnection', 'OUT', [], { x: 18432, y: 6144 });
-          railCenterY = portObjMeta.get(startBridgePortId)!.cy;
-          railStartX = x2 + 12288;
-        } else if (comp.type === 'power_0v') {
-          objectBlocks.push(
-            [`pol1 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 184328`, idProp].join('\n'),
-          );
-          startBridgePortId = addPortObj(1, 'EConnection', 'IN', [], { x: 18432, y: 6144 });
-          railCenterY = portObjMeta.get(startBridgePortId)!.cy;
-          railStartX = x2 + 12288;
-        }
-
-        const railItems = compEdges
-          .map((e) => {
-            const side: 'from' | 'to' = e.from.componentId === comp.id ? 'from' : 'to';
-            const origPort = side === 'from' ? e.from.port : e.to.port;
-            const otherId = side === 'from' ? e.to.componentId : e.from.componentId;
-            const otherPort = side === 'from' ? e.to.port : e.from.port;
-            const otherComp = compById.get(otherId);
-            const off = otherComp ? getEffectivePortOffset(otherComp, otherPort) : { x: 0, y: 0 };
-            const targetX = otherComp?.layout
-              ? Math.round((otherComp.layout.x + off.x) * FS_UNIT_PER_MM)
-              : railStartX;
-            return { edgeId: e.id, side, origPort, targetX };
-          })
-          .sort((a, b) => a.targetX - b.targetX || a.edgeId.localeCompare(b.edgeId));
-
-        const maxRailRightRaw =
-          (workingDoc.metadata.sheetWidthMm > 300 || workingDoc.metadata.sheetHeightMm > 220 ? 1105920 : 819200) -
-          12288;
-        const minRailGap = 15360;
-        if (comp.type === 'electrical_junction') {
-          const bandHitsOccupied = (cy: number): boolean => {
-            const ry1 = cy - 6144;
-            const ry2 = cy + 6144;
-            if (occupiedElecSliceXsByY.some((occ) => Math.abs(occ.y - cy) < 15360)) return true;
-            return occupiedRects.some(
-              (r) =>
-                !(r.x1 === x1 && r.y1 === y1 && r.x2 === x2 && r.y2 === y2) &&
-                r.x2 > railStartX &&
-                r.x1 < maxRailRightRaw + 12288 &&
-                r.y1 < ry2 + 2048 &&
-                r.y2 + 2048 > ry1,
-            );
-          };
-          while (railCenterY > 98304 && bandHitsOccupied(railCenterY)) {
-            railCenterY -= 15360;
-          }
-        }
-        const railSliceY1 = railCenterY - 6144;
-        const minNeededSpan = Math.max(0, (railItems.length - 1) * minRailGap);
-        let cursorX = Math.min(railStartX, Math.max(4096, maxRailRightRaw - minNeededSpan));
-
-        const addElecRailSlicePort = (
-          sliceParentId: number,
-          gateNum: number,
-          rawCx: number,
-          rawCy: number,
-          extraProps: string[] = [],
-        ): number => {
-          const pid = allocObjId();
-          const px1 = rawCx - 5120;
-          const py1 = rawCy - 5120;
-          const px2 = rawCx + 5120;
-          const py2 = rawCy + 5120;
-          const blockIdx = objectBlocks.length;
-          objectBlocks.push([`EConnection O${pid} ${px1} ${py1} ${px2} ${py2} 0 0 348163`, ...extraProps].join('\n'));
-          gateLines.push(`gate${gateNum} # ${sliceParentId} ${pid}`);
-          const hidden = extraProps.some((p) => p.includes('S state INT 4'));
-          portObjMeta.set(pid, {
-            blockIdx,
-            parentId: sliceParentId,
-            cls: 'EConnection',
-            cx: rawCx,
-            cy: rawCy,
-            hidden,
-            hasL: false,
-          });
-          routingPorts.set(pid, {
-            objId: pid,
-            parentId: sliceParentId,
-            cls: 'EConnection',
-            cx: rawCx,
-            cy: rawCy,
-            hidden,
-          });
-          return pid;
-        };
-
-        let prevBridgeOut = startBridgePortId;
-        for (let sIdx = 0; sIdx < railItems.length; sIdx++) {
-          const item = railItems[sIdx];
-          const remainingAfter = railItems.length - 1 - sIdx;
-          const maxForThisSlice = maxRailRightRaw - remainingAfter * minRailGap;
-          let sliceX1 = Math.max(cursorX, Math.min(maxForThisSlice, item.targetX - 6144));
-          while (
-            occupiedElecSliceXsByY.some(
-              (occ) => Math.abs(occ.y - railCenterY) < 15360 && Math.abs(occ.x - (sliceX1 + 6144)) < 15360,
-            ) &&
-            sliceX1 + 15360 <= maxForThisSlice
-          ) {
-            sliceX1 += 15360;
-          }
-          const sObjId = comp.type === 'electrical_junction' && sIdx === 0 ? parentId : allocObjId();
-          const cx = sliceX1 + 6144;
-          occupiedElecSliceXsByY.push({ x: cx, y: railCenterY });
-          occupiedRects.push({ x1: sliceX1, y1: railSliceY1, x2: sliceX1 + 12288, y2: railSliceY1 + 12288 });
-          routingObstacles.push({
-            ownerId: sObjId,
-            cls: 'ETriconnection',
-            x1: sliceX1,
-            y1: railSliceY1,
-            x2: sliceX1 + 12288,
-            y2: railSliceY1 + 12288,
-          });
-          objectBlocks.push(
-            [
-              `ETriconnection O${sObjId} ${sliceX1} ${railSliceY1} ${sliceX1 + 12288} ${railSliceY1 + 12288} 0 0 4321283`,
-              ` S _MCP_ELEC_RAIL_OWNER S ${comp.id}`,
-              ` S _MCP_ELEC_RAIL_TYPE S ${comp.type}`,
-              ` S _MCP_ELEC_RAIL_SLICE I ${sIdx}`,
-            ].join('\n'),
-          );
-
-          const hasBridgeIn = prevBridgeOut !== undefined;
-          if (hasBridgeIn) {
-            const bIn = addElecRailSlicePort(sObjId, 1, cx, railCenterY);
-            elecRailBridges.push({ pA: prevBridgeOut!, pB: bIn });
-          } else {
-            addElecRailSlicePort(sObjId, 1, cx, railCenterY, [' S state INT 4']);
-          }
-
-          const tapPid = addElecRailSlicePort(sObjId, 2, cx, railCenterY, [
-            ` S _MCP_ELEC_RAIL_PORT S ${item.origPort}`,
-          ]);
-          edgePortOverride.set(`${item.edgeId}:${item.side}`, tapPid);
-
-          addElecRailSlicePort(sObjId, 3, cx, railCenterY, [' S state INT 4']);
-
-          if (sIdx < railItems.length - 1) {
-            prevBridgeOut = addElecRailSlicePort(sObjId, 4, cx, railCenterY);
-          } else {
-            addElecRailSlicePort(sObjId, 4, cx, railCenterY, [' S state INT 4']);
-            prevBridgeOut = undefined;
-          }
-
-          cursorX = sliceX1 + minRailGap;
-        }
-        break;
-      }
-      case 'pushbutton_no': {
-        const cls = comp.params.detent ? 'E_S031' : 'E_S011';
-        objectBlocks.push(
-          [`${cls} O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4142088`, idProp, ...elecLabelProp].join(
-            '\n',
-          ),
-        );
-        addPortObj(1, 'EConnection', '13', [], { x: 15360, y: 0 });
-        addPortObj(2, 'EConnection', '14', [], { x: 15360, y: 30720 });
-        break;
-      }
-      case 'pushbutton_nc': {
-        const isDetent = Boolean(comp.params.detent);
-        objectBlocks.push(
-          [
-            `E_S012 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4454408`,
-            idProp,
-            ...(isDetent ? [' S _MCP_DETENT B T'] : []),
-            ...elecLabelProp,
-          ].join('\n'),
-        );
-        addPortObj(1, 'EConnection', '11', [], { x: 15360, y: 0 });
-        addPortObj(2, 'EConnection', '12', [], { x: 15360, y: 30720 });
-        break;
-      }
-      case 'relay_contact_no':
-      case 'limit_switch_no': {
-        const switchType = comp.type === 'limit_switch_no' ? 1 : 0;
-        objectBlocks.push(
-          [
-            `E_S001 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3665928`,
-            idProp,
-            ` S SWITCH_TYPE I ${switchType}`,
-            ...elecLabelProp,
-          ].join('\n'),
-        );
-        addPortObj(1, 'EConnection', '13', [], { x: 10240, y: 0 });
-        addPortObj(2, 'EConnection', '14', [], { x: 10240, y: 30720 });
-        break;
-      }
-      case 'relay_contact_nc':
-      case 'limit_switch_nc': {
-        const switchType = comp.type === 'limit_switch_nc' ? 1 : 0;
-        objectBlocks.push(
-          [
-            `E_S002 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 1472008`,
-            idProp,
-            ` S SWITCH_TYPE I ${switchType}`,
-            ...elecLabelProp,
-          ].join('\n'),
-        );
-        addPortObj(1, 'EConnection', '11', [], { x: 10240, y: 0 });
-        addPortObj(2, 'EConnection', '12', [], { x: 10240, y: 30720 });
-        break;
-      }
-      case 'relay_coil': {
-        objectBlocks.push(
-          [`E_K001 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 645133`, idProp, ...elecLabelProp].join(
-            '\n',
-          ),
-        );
-        addPortObj(1, 'EConnection', 'A1', [], { x: 12288, y: 0 });
-        addPortObj(2, 'EConnection', 'A2', [], { x: 12288, y: 30720 });
-        break;
-      }
-      case 'timer_relay_on_delay': {
-        const delayTenths = Math.max(0.1, Math.round((Number(comp.params.delayMs ?? 1000) / 100) * 10) / 10);
-        objectBlocks.push(
-          [
-            `E_K008 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 1105928`,
-            idProp,
-            ' S DELAY_TIME_FEST B T',
-            ` S DELAY_TIME F ${delayTenths}`,
-            ...elecLabelProp,
-          ].join('\n'),
-        );
-        addPortObj(1, 'EConnection', 'A1');
-        addPortObj(2, 'EConnection', 'A2');
-        break;
-      }
-      case 'electrical_counter': {
-        const preset = Number(comp.params.presetCount ?? 3);
-        objectBlocks.push(
-          [
-            `E_P010 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 2508808`,
-            idProp,
-            ' S J_FEST B T',
-            ` S J F ${preset}`,
-            ' S N_FEST B T',
-            ` S N F ${preset}`,
-            ...elecLabelProp,
-          ].join('\n'),
-        );
-        addPortObj(1, 'EConnection', 'A1');
-        addPortObj(2, 'EConnection', 'A2');
-        addPortObj(3, 'EConnection', 'R1');
-        addPortObj(4, 'EConnection', 'R2');
-        break;
-      }
-      case 'valve_solenoid': {
-        objectBlocks.push(
-          [`E_Y001 O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 9113608`, idProp, ...elecLabelProp].join(
-            '\n',
-          ),
-        );
-        addPortObj(1, 'EConnection', 'A1', [], { x: 12288, y: 0 });
-        addPortObj(2, 'EConnection', 'A2', [], { x: 12288, y: 30720 });
-        break;
-      }
-      case 'indicator_lamp': {
-        const rgb = lampColorToRgbInt(String(comp.params.color ?? 'green'));
-        objectBlocks.push(
-          [
-            `lampe O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4126728`,
-            idProp,
-            ` S sig_color I ${rgb}`,
-            ...elecLabelProp,
-          ].join('\n'),
-        );
-        addPortObj(1, 'EConnection', 'X1');
-        addPortObj(2, 'EConnection', 'X2');
-        break;
-      }
-      case 'relay_contact_changeover': {
-        objectBlocks.push(
-          [`LWechsler O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 3665928`, idProp, ...elecLabelProp].join(
-            '\n',
-          ),
-        );
-        addPortObj(1, 'EConnection', '11');
-        addPortObj(2, 'EConnection', '12');
-        addPortObj(3, 'EConnection', '14');
-        break;
-      }
-      case 'timer_relay_off_delay': {
-        const delayTenths = Math.max(0.1, Math.round((Number(comp.params.delayMs ?? 1000) / 100) * 10) / 10);
-        objectBlocks.push(
-          [
-            `LRelaismagnet_abfver O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 1105928`,
-            idProp,
-            ' S DELAY_TIME_FEST B T',
-            ` S DELAY_TIME F ${delayTenths}`,
-            ...elecLabelProp,
-          ].join('\n'),
-        );
-        addPortObj(1, 'EConnection', 'A1');
-        addPortObj(2, 'EConnection', 'A2');
-        break;
-      }
-      default: {
-        // Extension catalog types: always choose a FluidSIM 4.5 native class whose required gate count matches
-        // what we emit (NEVER emit PTriconnection or ETriconnection with != 4 gates, as fl_sim_p.exe crashes!).
-        const isElec =
-          comp.type.startsWith('relay_') ||
-          comp.type.startsWith('timer_relay_') ||
-          comp.type.startsWith('proximity_');
-        const paramsB64 = Buffer.from(JSON.stringify(comp.params), 'utf8').toString('base64');
-        const actLProp = comp.leftActuation
-          ? [` S _MCP_ACT_L S ${Buffer.from(JSON.stringify(comp.leftActuation), 'utf8').toString('base64')}`]
-          : [];
-        const actRProp = comp.rightActuation
-          ? [` S _MCP_ACT_R S ${Buffer.from(JSON.stringify(comp.rightActuation), 'utf8').toString('base64')}`]
-          : [];
-
-        const nativeFallbackMap: Record<string, { cls: string; ports: string[] }> = {
-          cylinder_rodless: { cls: 'CylDGPPAB', ports: ['A', 'B'] },
-          air_motor: { cls: 'PAR1b', ports: ['A', 'B'] },
-          air_reservoir: { cls: 'FilterP', ports: ['1', '2'] },
-          pressure_relief_valve: { cls: 'CheckValveSpringLoadedP', ports: ['1', '3'] },
-          pressure_gauge: { cls: 'PSW1', ports: ['1'] },
-          proximity_switch_magnetic: { cls: 'E_S001', ports: ['13', '14'] },
-          time_delay_valve: { cls: 'WV_3', ports: ['2', '1', '3', '12', '10'] },
-          pressure_sequence_valve: { cls: 'WV_3', ports: ['2', '1', '3', '12', '10'] },
-          exhaust_silencer: { cls: 'PSW1', ports: ['1'] },
-          blind_plug: { cls: 'PSW1', ports: ['1'] },
-        };
-        const mapped = nativeFallbackMap[comp.type];
-        const baseCls = mapped ? mapped.cls : isElec ? 'E_K001' : 'PTriconnection';
-
-        const extraSymProps: string[] = [];
-        if (baseCls === 'CylDGPPAB') {
-          const syms = buildCylinderSyms(false);
-          extraSymProps.push(` S dxf_prim_list V ${symAlloc.alloc(syms.body)}`);
-          extraSymProps.push(` S dxf_prim_list2 V ${symAlloc.alloc(syms.rod)}`);
-        } else if (baseCls === 'PAR1b') {
-          extraSymProps.push(` S dxf_prim_list V ${symAlloc.alloc(buildSwivelDriveSym())}`);
-        } else if (baseCls === 'FilterP') {
-          extraSymProps.push(` S dxf_prim_list V ${symAlloc.alloc(buildFilterSym())}`);
-        } else if (baseCls === 'CheckValveSpringLoadedP') {
-          const syms = buildCheckValveSyms(true);
-          extraSymProps.push(` S dxf_prim_list V ${symAlloc.alloc(syms.closed)}`);
-          extraSymProps.push(` S dxf_prim_list2 V ${symAlloc.alloc(syms.open)}`);
-        } else if (baseCls === 'PSW1') {
-          extraSymProps.push(` S dxf_prim_list V ${symAlloc.alloc(buildPressureSwitchSym())}`);
-        } else if (baseCls === 'WV_3') {
-          extraSymProps.push(
-            ` S dxf_prim_list V ${symAlloc.alloc(
-              buildValveSym('valve_3_2', {
-                leftActuation: { type: 'pneumatic_pilot' },
-                rightActuation: { type: 'spring' },
-              }),
-            )}`,
-          );
-        }
-
-        objectBlocks.push(
-          [
-            `${baseCls} O${parentId} ${x1} ${y1} ${x2} ${y2} ${rot} ${flip} 4311043`,
-            idProp,
-            ` S _MCP_TYPE S ${comp.type}`,
-            ` S _MCP_PARAMS S ${paramsB64}`,
-            ...extraSymProps,
-            ...actLProp,
-            ...actRProp,
-            ...labelProp,
-          ].join('\n'),
-        );
-
-        if (mapped) {
-          for (const portName of mapped.ports) {
-            const gNum = portNameToGateNumber(comp.type, portName);
-            addPortObj(gNum, isElec ? 'EConnection' : 'PConnection', portName, isElec ? [] : pPortProps(portName));
-          }
-        } else if (baseCls === 'PTriconnection' || baseCls === 'ETriconnection') {
-          // Enforce strict 4-gate FluidSIM 4.5 invariant on any junction fallback
-          const referencedPorts = new Set<string>();
-          for (const e of workingDoc.connections) {
-            if (e.from.componentId === comp.id) referencedPorts.add(e.from.port);
-            if (e.to.componentId === comp.id) referencedPorts.add(e.to.port);
-          }
-          const byGate = new Map<number, string>();
-          for (const portName of referencedPorts) {
-            const gNum = portNameToGateNumber(comp.type, portName);
-            if (gNum >= 1 && gNum <= 4 && !byGate.has(gNum)) {
-              byGate.set(gNum, portName);
-            }
-          }
-          for (let g = 1; g <= 4; g++) {
-            const portName = byGate.get(g) ?? String(g);
-            addPortObj(g, isElec ? 'EConnection' : 'PConnection', portName, isElec ? [] : pPortProps(portName));
-          }
-        } else {
-          const referencedPorts = new Set<string>();
-          for (const e of workingDoc.connections) {
-            if (e.from.componentId === comp.id) referencedPorts.add(e.from.port);
-            if (e.to.componentId === comp.id) referencedPorts.add(e.to.port);
-          }
-          if (referencedPorts.size === 0) {
-            referencedPorts.add(isElec ? 'A1' : '1');
-            if (isElec) referencedPorts.add('A2');
-          }
-          for (const portName of referencedPorts) {
-            const gNum = portNameToGateNumber(comp.type, portName);
-            addPortObj(gNum, isElec ? 'EConnection' : 'PConnection', portName, isElec ? [] : pPortProps(portName));
-          }
-        }
-
-        emitDistanceRule(comp);
-        break;
-      }
-    }
-  }
-
-  // Emit preserved decorative objects (CAD_RECT, text, etc.) if present from an edited native .ct file,
-  // or emit a standard FluidSIM title `text` object carrying sheet metadata at top-left (y = 4..12 mm).
-  const sheetMetaProps: string[] = [
-    ` S _MCP_SHEET_W F ${workingDoc.metadata.sheetWidthMm}`,
-    ` S _MCP_SHEET_H F ${workingDoc.metadata.sheetHeightMm}`,
-    ...(workingDoc.metadata.sheetDomain ? [` S _MCP_SHEET_DOMAIN S ${workingDoc.metadata.sheetDomain}`] : []),
-    ...(workingDoc.metadata.allowExternalElectricalSheet !== undefined
-      ? [` S _MCP_ALLOW_EXT_ELEC B ${workingDoc.metadata.allowExternalElectricalSheet ? 'T' : 'F'}`]
-      : []),
-  ];
-
-  const titleRect: RawRect = { x1: 18432, y1: 12288, x2: 368640, y2: 36864 };
-  occupiedRects.push(titleRect);
-
-  if (hasPreservedCt && preserved.preservedDecorativeObjects.length > 0) {
-    let attachedSheetMeta = false;
-    for (const rawBlock of preserved.preservedDecorativeObjects) {
-      const newId = allocObjId();
-      let reindexed = rawBlock.replace(/^([A-Za-z0-9_]+)\s+O\d+(\s+)/, `$1 O${newId}$2`);
-      if (!attachedSheetMeta && reindexed.startsWith('text ')) {
-        reindexed = [reindexed, ...sheetMetaProps].join('\n');
-        attachedSheetMeta = true;
-      }
-      objectBlocks.push(reindexed);
-    }
-    if (!attachedSheetMeta) {
-      const metaId = allocObjId();
-      objectBlocks.push(
-        [
-          `text O${metaId} ${titleRect.x1} ${titleRect.y1} ${titleRect.x2} ${titleRect.y2} 0 0 1167363`,
-          ' S height I 16',
-          ' S font_name S Arial',
-          ` S text S ${(workingDoc.metadata.title || 'FluidSIM 4.5 Circuit').replace(/[\r\n]+/g, ' ').trim()}`,
-          ...sheetMetaProps,
-        ].join('\n'),
-      );
-    }
-  } else {
-    const titleId = allocObjId();
-    const safeTitle = (workingDoc.metadata.title || 'FluidSIM 4.5 Circuit').replace(/[\r\n]+/g, ' ').trim();
-    objectBlocks.push(
-      [
-        `text O${titleId} ${titleRect.x1} ${titleRect.y1} ${titleRect.x2} ${titleRect.y2} 0 0 1167363`,
-        ' S height I 16',
-        ' S font_name S Arial',
-        ` S text S ${safeTitle}`,
-        ...sheetMetaProps,
-      ].join('\n'),
-    );
-  }
-
-  // Emit collision-free visible component label `text` objects (marked with _MCP_LABEL_FOR so reparsing skips them)
-  const rectsOverlap = (a: RawRect, b: RawRect, pad = 1024): boolean =>
-    a.x1 < b.x2 + pad && a.x2 + pad > b.x1 && a.y1 < b.y2 + pad && a.y2 + pad > b.y1;
-
-  for (const cand of labelCandidates) {
-    const safeLabel = cand.label.replace(/[\r\n]+/g, ' ').trim();
-    if (!safeLabel) continue;
-    const lblW = Math.max(14336, Math.min(49152, safeLabel.length * 4096 + 4096));
-    const lblH = 10240;
-    const midY = cand.y1 + Math.round((cand.y2 - cand.y1 - lblH) / 2);
-    const midX = cand.x1 + Math.round((cand.x2 - cand.x1 - lblW) / 2);
-    const gap = 5120;
-    let trials: Array<{ x1: number; y1: number }>;
-    if (cand.compType.startsWith('valve_')) {
-      trials = [
-        { x1: cand.x1, y1: cand.y1 - lblH - gap }, // Top-left above valve body
-        { x1: midX, y1: cand.y1 - lblH - gap }, // Top-center above valve body
-        { x1: cand.x1, y1: cand.y2 + gap }, // Below-left
-        { x1: midX, y1: cand.y2 + gap }, // Below-center
-      ];
-    } else if (cand.compType.startsWith('cylinder_')) {
-      trials = [
-        { x1: midX, y1: cand.y1 - 28672 - lblH - 3072 }, // Centered above R_SCHALT
-        { x1: cand.x1 - lblW - gap, y1: midY }, // Left of cylinder
-        { x1: midX, y1: cand.y2 + gap }, // Below cylinder
-      ];
-    } else if (cand.compType === 'swivel_drive' || cand.compType === 'air_motor') {
-      trials = [
-        { x1: midX, y1: cand.y1 - lblH - gap }, // Centered above swivel drive
-        { x1: cand.x2 + gap, y1: midY }, // Right
-        { x1: cand.x1 - lblW - gap, y1: midY }, // Left
-      ];
-    } else if (cand.compType === 'pressure_switch_differential') {
-      trials = [
-        { x1: midX, y1: cand.y2 + 3072 }, // Directly below PSW1 (matching real -2B1)
-        { x1: midX, y1: cand.y1 - lblH - 3072 }, // Above
-        { x1: cand.x2 + gap, y1: midY }, // Right
-      ];
-    } else if (cand.compType === 'air_service_unit') {
-      trials = [
-        { x1: midX, y1: cand.y2 + 3072 }, // Below FRL
-        { x1: cand.x1, y1: cand.y1 - lblH - 3072 }, // Above-left FRL
-      ];
-    } else if (cand.compType === 'vacuum_suction_nozzle') {
-      trials = [
-        { x1: cand.x1 - lblW - gap, y1: midY }, // Left of Venturi (away from right exhaust arrow)
-        { x1: midX, y1: cand.y2 + gap }, // Below
-        { x1: midX, y1: cand.y1 - lblH - gap }, // Above
-      ];
-    } else if (cand.compType === 'vacuum_sucker') {
-      trials = [
-        { x1: midX, y1: cand.y2 + 3072 }, // Directly below cup (away from top port 1v wire)
-        { x1: cand.x2 + gap, y1: midY }, // Right
-        { x1: cand.x1 - lblW - gap, y1: midY }, // Left
-      ];
-    } else if (cand.compType === 'air_filter') {
-      trials = [
-        { x1: cand.x1 - lblW - gap, y1: midY }, // Left of filter (clear of adjacent check valve)
-        { x1: cand.x2 + gap, y1: midY }, // Right
-        { x1: midX, y1: cand.y2 + gap }, // Below
-      ];
-    } else {
-      trials = [
-        { x1: cand.x2 + gap, y1: midY }, // Right
-        { x1: cand.x1 - lblW - gap, y1: midY }, // Left
-        { x1: midX, y1: cand.y2 + gap }, // Below
-        { x1: midX, y1: cand.y1 - lblH - gap }, // Above
-        { x1: cand.x2 + gap, y1: cand.y1 }, // Top-right
-        { x1: cand.x1 - lblW - gap, y1: cand.y1 }, // Top-left
-        { x1: cand.x2 + gap * 2, y1: midY }, // Far right
-        { x1: midX, y1: cand.y2 + gap * 2 }, // Far below
-      ];
-    }
-
-    for (const t of trials) {
-      const r: RawRect = { x1: t.x1, y1: t.y1, x2: t.x1 + lblW, y2: t.y1 + lblH };
-      if (r.x1 < 4096 || r.y1 < titleRect.y2 + 20 * 1024) continue;
-      if (!occupiedRects.some((occ) => rectsOverlap(r, occ, 1024))) {
-        occupiedRects.push(r);
-        const lblId = allocObjId();
-        objectBlocks.push(
-          [
-            `text O${lblId} ${r.x1} ${r.y1} ${r.x2} ${r.y2} 0 0 1167363`,
-            ' S height I 10',
-            ' S font_name S Arial',
-            ` S text S ${safeLabel}`,
-            ` S _MCP_LABEL_FOR S ${cand.compId}`,
-          ].join('\n'),
-        );
-        break;
-      }
-    }
-  }
-
-  const normalizeOrthogonalRawPts = (
-    rawPts: Array<{ x: number; y: number }>,
-    ax: number,
-    ay: number,
-    bx: number,
-    by: number,
-  ): Array<{ x: number; y: number }> => {
-    const pts = rawPts.map((p) => ({ x: p.x, y: p.y }));
-    if (pts.length < 2) {
-      if (ax === bx || ay === by) return [{ x: ax, y: ay }, { x: bx, y: by }];
-      const midY = Math.round((ay + by) / 2);
-      return [
-        { x: ax, y: ay },
-        { x: ax, y: midY },
-        { x: bx, y: midY },
-        { x: bx, y: by },
-      ];
-    }
-    // Snap endpoints cleanly to true port centers while preserving orthogonality
-    if (pts.length >= 3) {
-      if (pts[0].x === pts[1].x) pts[1].x = ax;
-      else if (pts[0].y === pts[1].y) pts[1].y = ay;
-      const last = pts.length - 1;
-      if (pts[last].x === pts[last - 1].x) pts[last - 1].x = bx;
-      else if (pts[last].y === pts[last - 1].y) pts[last - 1].y = by;
-    }
-    pts[0] = { x: ax, y: ay };
-    pts[pts.length - 1] = { x: bx, y: by };
-
-    // Ensure every consecutive pair is strictly horizontal or vertical
-    const ortho: Array<{ x: number; y: number }> = [pts[0]];
-    for (let i = 1; i < pts.length; i++) {
-      const prev = ortho[ortho.length - 1];
-      const cur = pts[i];
-      if (prev.x === cur.x && prev.y === cur.y) continue;
-      if (prev.x !== cur.x && prev.y !== cur.y) {
-        ortho.push({ x: cur.x, y: prev.y });
-      }
-      ortho.push(cur);
-    }
-
-    // Merge collinear consecutive points
-    const merged: Array<{ x: number; y: number }> = [];
-    for (const p of ortho) {
-      if (merged.length >= 2) {
-        const a = merged[merged.length - 2];
-        const b = merged[merged.length - 1];
-        if ((a.x === b.x && b.x === p.x) || (a.y === b.y && b.y === p.y)) {
-          merged[merged.length - 1] = p;
-          continue;
-        }
-      }
-      merged.push(p);
-    }
-    return merged;
-  };
-
-  const injectPortLSegments = (portId: number, absPts: Array<{ x: number; y: number }>): boolean => {
-    const meta = portObjMeta.get(portId);
-    if (!meta || meta.hasL || absPts.length < 2) return false;
-    const lLines: string[] = [];
-    for (let i = 0; i < absPts.length - 1; i++) {
-      const sx = absPts[i].x - meta.cx;
-      const sy = absPts[i].y - meta.cy;
-      const ex = absPts[i + 1].x - meta.cx;
-      const ey = absPts[i + 1].y - meta.cy;
-      if (sx === ex && sy === ey) continue;
-      lLines.push(`L ${sx + 5120} ${sy + 5120} ${ex - 5120} ${ey - 5120}`);
-    }
-    if (lLines.length === 0) return false;
-    const blockLines = objectBlocks[meta.blockIdx].split('\n');
-    blockLines.splice(1, 0, ...lLines);
-    objectBlocks[meta.blockIdx] = blockLines.join('\n');
-    meta.hasL = true;
-    return true;
-  };
-
-  // Route all manifold bridges + external connections in ground-truth FluidSIM coordinates using orthogonal A*
-  const routingEdges: CtRoutingEdge[] = [];
-  const activeEdges: Array<{ edge: ConnectionEdge; pA: number; pB: number; key: string }> = [];
-
-  for (let i = 0; i < manifoldBridges.length; i++) {
-    const br = manifoldBridges[i];
-    routingEdges.push({
-      key: `bridge:${i}`,
-      fromPortId: br.pA,
-      toPortId: br.pB,
-      isManifoldBridge: true,
-    });
-  }
-
-  for (let i = 0; i < elecRailBridges.length; i++) {
-    const br = elecRailBridges[i];
-    routingEdges.push({
-      key: `ebridge:${i}`,
-      fromPortId: br.pA,
-      toPortId: br.pB,
-      isManifoldBridge: true,
-    });
-  }
-
-  for (const edge of workingDoc.connections) {
-    if (embeddedTerminatorEdgeIds.has(edge.id)) continue;
-    const pA =
-      edgePortOverride.get(`${edge.id}:from`) ??
-      portObjIdMap.get(`${edge.from.componentId}:${edge.from.port}`);
-    const pB =
-      edgePortOverride.get(`${edge.id}:to`) ??
-      portObjIdMap.get(`${edge.to.componentId}:${edge.to.port}`);
-    if (pA === undefined || pB === undefined) continue;
-    const key = `edge:${edge.id}`;
-    routingEdges.push({
-      key,
-      fromPortId: pA,
-      toPortId: pB,
-    });
-    activeEdges.push({ edge, pA, pB, key });
-  }
-
-  const routedPaths = routeCtConnections({
-    bounds: getFluidSimPrintableBounds(workingDoc.metadata.sheetWidthMm, workingDoc.metadata.sheetHeightMm),
-    obstacles: routingObstacles,
-    ports: routingPorts,
-    edges: routingEdges,
-  });
-
-  // Emit internal manifold slice bridges using native PConnection L segments
-  for (let i = 0; i < manifoldBridges.length; i++) {
-    const br = manifoldBridges[i];
-    const pts = routedPaths.get(`bridge:${i}`);
-    if (pts && !injectPortLSegments(br.pA, pts)) {
-      injectPortLSegments(br.pB, [...pts].reverse());
-    }
-    connectionBlocks.push(
-      [`CON PLine ${br.pA} ${br.pB}`, ' S COLOR I 0', ' S Style I 2', ' S _MCP_MANIFOLD_LINK B T'].join('\n'),
-    );
-  }
-
-  // Emit internal electrical rail slice bridges using native EConnection L segments
-  for (let i = 0; i < elecRailBridges.length; i++) {
-    const br = elecRailBridges[i];
-    const pts = routedPaths.get(`ebridge:${i}`);
-    if (pts && !injectPortLSegments(br.pA, pts)) {
-      injectPortLSegments(br.pB, [...pts].reverse());
-    }
-    connectionBlocks.push(
-      [`CON ELine ${br.pA} ${br.pB}`, ' S COLOR I 0', ' S Style I 2', ' S _MCP_MANIFOLD_LINK B T'].join('\n'),
-    );
-  }
-
-  // Emit CON PLine / CON ELine edges and attach orthogonal L segments to their PConnection/EConnection
-  for (const item of activeEdges) {
-    const { edge, pA, pB, key } = item;
-    const pts = routedPaths.get(key);
-    if (pts && !injectPortLSegments(pA, pts)) {
-      injectPortLSegments(pB, [...pts].reverse());
-    }
-    const conKind = edge.domain === 'pneumatic' ? 'PLine' : 'ELine';
-    connectionBlocks.push(
-      [`CON ${conKind} ${pA} ${pB}`, ' S COLOR I 0', ' S Style I 2', ` S _MCP_EDGE_ID S ${edge.id}`].join('\n'),
-    );
-  }
-
-  const ctBody = [...objectBlocks, '0 0 0 # 0 0 0 0 0 0', ...gateLines, ...connectionBlocks].join('\n');
-  const trailerText = symAlloc.renderTrailer();
-
-  const shouldUpgradeA4Header =
-    hasPreservedCt &&
-    (workingDoc.metadata.sheetWidthMm > 300 || workingDoc.metadata.sheetHeightMm > 220) &&
-    isDefaultA4Header(preserved.headerLinesB64);
-
-  return {
-    ...(hasPreservedCt
-      ? {
-          ...(!shouldUpgradeA4Header ? { headerLinesB64: preserved.headerLinesB64 } : {}),
-          profile: preserved.profile,
-          previewBlockB64: preserved.previewBlockB64,
-          ...(preserved.fsPreviewBlock !== undefined ? { fsPreviewBlock: preserved.fsPreviewBlock } : {}),
-        }
-      : {}),
-    ctBody,
-    trailerText,
-  };
-}
-
-export interface CtTextInvariantReport {
-  ok: boolean;
-  badJunctions: Array<{ cls: string; objId: number; gateCount: number }>;
-}
-
-/**
- * Verifies FluidSIM 4.5 C++ loader structural invariants on a decoded .ct body:
- * every PTriconnection and ETriconnection MUST have exactly 4 child gates (fewer crashes fl_sim_p.exe).
- */
-export function verifyCtTextInvariants(ctBody: string): CtTextInvariantReport {
-  const ast = parseCtBodyAst(ctBody);
-  const gateCountByParent = new Map<number, number>();
-  for (const g of ast.gates) {
-    gateCountByParent.set(g.parentId, (gateCountByParent.get(g.parentId) ?? 0) + 1);
-  }
-  const badJunctions: Array<{ cls: string; objId: number; gateCount: number }> = [];
-  for (let i = 0; i < ast.objects.length; i++) {
-    const obj = ast.objects[i];
-    if (obj.cls === 'PTriconnection' || obj.cls === 'ETriconnection') {
-      const count = gateCountByParent.get(i) ?? 0;
-      if (count !== 4) {
-        badJunctions.push({ cls: obj.cls, objId: obj.objId, gateCount: count });
-      }
-    }
-  }
-  return {
-    ok: badJunctions.length === 0,
-    badJunctions,
-  };
-}
-
-export interface CtVisualLayoutInvariantReport {
-  ok: boolean;
-  symCount: number;
-  missingSymbols: Array<{ cls: string; objId: number; prop: string; symIdx: number }>;
-  missingDxfPrimList: Array<{ cls: string; objId: number }>;
-  negativeCoordObjects: Array<{ cls: string; objId: number; x1: number; y1: number }>;
-  titleCollisions: Array<{ cls: string; objId: number; y1: number; titleY2: number }>;
-  overlaps: Array<{ a: string; b: string }>;
-  wireGeometry: CtWireGeometryReport;
-}
-
-const DXF_SYMBOL_REQUIRED_CLASSES = new Set([
-  'CylDGPPAB',
-  'WV_2',
-  'WV_3',
-  'WV_4',
-  'WV_5',
-  'DRSV2_pneu',
-  'FilterP',
-  'CheckValveP',
-  'CheckValveSpringLoadedP',
-  'CheckValvePilotOperatedSpringLoadedP',
-  'Wartungseinheit2',
-]);
-
-/**
- * Verifies FluidSIM 4.5 visual rendering & raw-AST layout invariants on a decoded `.ct` file:
- * 1. Every `S dxf_prim_list V <n>` / `dxf_prim_list2 V <n>` references an existing `SYM <n>` in `BEGINSYM..ENDSYM`.
- * 2. Every symbol-rendered component class (`CylDGPPAB`, `WV_*`, `DRSV2_pneu`, `FilterP`, `CheckValve*`, `Wartungseinheit2`, etc.) emits `dxf_prim_list`.
- * 3. Every non-port object has strictly positive coordinates (`x1 > 0 && y1 > 0`).
- * 4. Every component, `R_SCHALT`, and component label sits `>= 20 * 1024` below the title `text` object's `y2`.
- * 5. Zero overlapping pairs among all non-port objects (components, `R_SCHALT`, `text`) in raw FluidSIM coordinates.
- */
-export function verifyCtVisualLayoutInvariants(
-  ctBody: string,
-  trailerText: string,
-  options?: { sheetWidthMm?: number; sheetHeightMm?: number },
-): CtVisualLayoutInvariantReport {
-  const ast = parseCtBodyAst(ctBody);
-
-  // Parse defined SYM <n> blocks inside BEGINSYM ... ENDSYM
-  const symIds = new Set<number>();
-  let inSymSection = false;
-  for (const rawLine of trailerText.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (line === 'BEGINSYM') {
-      inSymSection = true;
-      continue;
-    }
-    if (line === 'ENDSYM') {
-      inSymSection = false;
-      continue;
-    }
-    if (inSymSection) {
-      const m = line.match(/^SYM\s+(\d+)$/);
-      if (m) symIds.add(Number(m[1]));
-    }
-  }
-
-  const missingSymbols: CtVisualLayoutInvariantReport['missingSymbols'] = [];
-  const missingDxfPrimList: CtVisualLayoutInvariantReport['missingDxfPrimList'] = [];
-  const negativeCoordObjects: CtVisualLayoutInvariantReport['negativeCoordObjects'] = [];
-  const titleCollisions: CtVisualLayoutInvariantReport['titleCollisions'] = [];
-  const overlaps: CtVisualLayoutInvariantReport['overlaps'] = [];
-
-  const nonPortObjs: RawCtObject[] = [];
-  let titleObj: RawCtObject | undefined;
-
-  for (const obj of ast.objects) {
-    if (PORT_CLASSES.has(obj.cls)) continue;
-    nonPortObjs.push(obj);
-
-    if (obj.x1 <= 0 || obj.y1 <= 0) {
-      negativeCoordObjects.push({ cls: obj.cls, objId: obj.objId, x1: obj.x1, y1: obj.y1 });
-    }
-
-    if (obj.cls === 'text' && !getScalarProp(obj.props, '_MCP_LABEL_FOR') && !titleObj) {
-      titleObj = obj;
-    }
-
-    const dxf1 = getScalarProp(obj.props, 'dxf_prim_list');
-    const dxf2 = getScalarProp(obj.props, 'dxf_prim_list2');
-    if (DXF_SYMBOL_REQUIRED_CLASSES.has(obj.cls) && dxf1 === undefined) {
-      missingDxfPrimList.push({ cls: obj.cls, objId: obj.objId });
-    }
-    if (dxf1 !== undefined) {
-      const idx = Number(dxf1);
-      if (!Number.isInteger(idx) || !symIds.has(idx)) {
-        missingSymbols.push({ cls: obj.cls, objId: obj.objId, prop: 'dxf_prim_list', symIdx: idx });
-      }
-    }
-    if (dxf2 !== undefined) {
-      const idx = Number(dxf2);
-      if (!Number.isInteger(idx) || !symIds.has(idx)) {
-        missingSymbols.push({ cls: obj.cls, objId: obj.objId, prop: 'dxf_prim_list2', symIdx: idx });
-      }
-    }
-  }
-
-  if (titleObj) {
-    const minAllowedY = titleObj.y2 + 20 * 1024;
-    for (const obj of nonPortObjs) {
-      if (obj === titleObj) continue;
-      if (obj.y1 < minAllowedY) {
-        titleCollisions.push({ cls: obj.cls, objId: obj.objId, y1: obj.y1, titleY2: titleObj.y2 });
-      }
-    }
-  }
-
-  for (let i = 0; i < nonPortObjs.length; i++) {
-    const a = nonPortObjs[i];
-    for (let j = i + 1; j < nonPortObjs.length; j++) {
-      const b = nonPortObjs[j];
-      const ox = a.x1 < b.x2 && a.x2 > b.x1;
-      const oy = a.y1 < b.y2 && a.y2 > b.y1;
-      if (ox && oy) {
-        overlaps.push({ a: `${a.cls}#O${a.objId}`, b: `${b.cls}#O${b.objId}` });
-      }
-    }
-  }
-
-  const wireGeometry = verifyCtWireGeometryInvariants(ctBody, options);
-
-  return {
-    ok:
-      missingSymbols.length === 0 &&
-      missingDxfPrimList.length === 0 &&
-      negativeCoordObjects.length === 0 &&
-      titleCollisions.length === 0 &&
-      overlaps.length === 0 &&
-      wireGeometry.ok,
-    symCount: symIds.size,
-    missingSymbols,
-    missingDxfPrimList,
-    negativeCoordObjects,
-    titleCollisions,
-    overlaps,
-    wireGeometry,
-  };
-}
-
+export {
+  serializeDocumentToCtContainer,
+  verifyCtTextInvariants,
+  verifyCtVisualLayoutInvariants,
+  type CtTextInvariantReport,
+  type CtVisualLayoutInvariantReport,
+} from './ctTextCompiler';

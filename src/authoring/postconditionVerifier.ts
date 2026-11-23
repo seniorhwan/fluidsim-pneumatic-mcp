@@ -11,20 +11,22 @@ export interface PostconditionResult {
   passed: boolean;
   roundtripPassed: boolean;
   visualLayoutOk: boolean;
+  f9SolverOk: boolean;
   validation: StaticValidationReport;
   reparsedDocument: CircuitDocument;
 }
 
 /**
- * Inspects a binary FluidSIM 4.5 `.ct` buffer for F6 superficial visual & wire geometry issues.
+ * Inspects a binary FluidSIM 4.5 `.ct` buffer for BOTH F6 visual/wire geometry issues
+ * AND F9 solver state-machine invariants (`CV_ID`, `VALUECLASS`, `POS`, `PILOT_L/R`, 3-gate `PTriconnection`).
  */
 export function collectCtVisualFindings(
   diskBytes: Buffer,
   sheetWidthMm?: number,
   sheetHeightMm?: number,
-): { ok: boolean; findings: StaticValidationFinding[] } {
+): { ok: boolean; f9SolverOk: boolean; findings: StaticValidationFinding[] } {
   if (!isFluidSimCtBuffer(diskBytes)) {
-    return { ok: true, findings: [] };
+    return { ok: true, f9SolverOk: true, findings: [] };
   }
   const dec = decodeCtContainer(diskBytes);
   const report = verifyCtVisualLayoutInvariants(dec.ctBody, dec.trailerText, {
@@ -33,6 +35,43 @@ export function collectCtVisualFindings(
   });
   const findings: StaticValidationFinding[] = [];
   const wg = report.wireGeometry;
+
+  if (!report.f9Solver.ok) {
+    for (const ve of report.f9Solver.valveErrors) {
+      findings.push({
+        severity: 'error',
+        category: 'InvalidTopology',
+        code: 'CT_F9_VALVE_SOLVER_DEFECT',
+        message: `FluidSIM 4.5 F9 solver invariant violation on ${ve.cls}#O${ve.objId}: ${ve.reason}`,
+        offendingIds: [`${ve.cls}#O${ve.objId}`],
+        suggestedFix: 'Re-compile valve via v2 FluidSIM 4.5 valve compiler.',
+      });
+    }
+    for (const je of report.f9Solver.junctionErrors) {
+      findings.push({
+        severity: 'error',
+        category: 'InvalidTopology',
+        code: 'CT_F9_JUNCTION_GATE_DEFECT',
+        message: `FluidSIM 4.5 junction invariant violation on ${je.cls}#O${je.objId} (${je.gateCount} gates): ${je.reason}`,
+        offendingIds: [`${je.cls}#O${je.objId}`],
+        suggestedFix: 'Ensure PTriconnection/ETriconnection has 3 gates (or 4 genuinely wired gates) with zero hidden S state INT 4 gates.',
+      });
+    }
+  }
+
+  if (report.missingSymbols.length > 0 || report.missingDxfPrimList.length > 0) {
+    findings.push({
+      severity: 'error',
+      category: 'InvalidTopology',
+      code: 'CT_MISSING_DXF_SYMBOL',
+      message: `${report.missingSymbols.length} dangling SYM references and ${report.missingDxfPrimList.length} components missing dxf_prim_list.`,
+      offendingIds: [
+        ...report.missingSymbols.map((m) => `${m.cls}#O${m.objId}`),
+        ...report.missingDxfPrimList.map((m) => `${m.cls}#O${m.objId}`),
+      ],
+      suggestedFix: 'Re-serialize through CtSymbolAllocator to populate BEGINSYM blocks.',
+    });
+  }
 
   if (wg.outOfBoundsObjects.length > 0 || wg.outOfBoundsSegments.length > 0) {
     findings.push({
@@ -85,12 +124,15 @@ export function collectCtVisualFindings(
     });
   }
 
-  return { ok: report.ok, findings };
+  return { ok: report.ok, f9SolverOk: report.f9Solver.ok, findings };
 }
 
 /**
  * Re-reads written file from disk, verifies lossless codec roundtrip invariants,
- * runs static engineering validation, and checks FluidSIM 4.5 visual/F6 geometry invariants.
+ * runs static engineering validation, and checks FluidSIM 4.5 F6 visual & F9 solver invariants.
+ *
+ * Strict v2 gate: `passed` is TRUE only when roundtrip, F9 solver invariants, AND visual layout
+ * are all clean (never returns `passed: true` when `visualLayoutOk === false` or `f9SolverOk === false`).
  */
 export function verifyWrittenCircuitPostcondition(
   guard: WorkspaceGuard,
@@ -107,17 +149,19 @@ export function verifyWrittenCircuitPostcondition(
     reparsedDocument.metadata.sheetHeightMm,
   );
   const findings = [...baseValidation.findings, ...visual.findings];
+  const errorCount = findings.filter((f) => f.severity === 'error').length;
   const validation: StaticValidationReport = {
-    valid: baseValidation.valid,
-    errorCount: baseValidation.errorCount,
+    valid: errorCount === 0,
+    errorCount,
     warningCount: findings.filter((f) => f.severity === 'warning').length,
     findings,
   };
 
   return {
-    passed: roundtrip.passed,
+    passed: roundtrip.passed && visual.ok && visual.f9SolverOk,
     roundtripPassed: roundtrip.passed,
     visualLayoutOk: visual.ok,
+    f9SolverOk: visual.f9SolverOk,
     validation,
     reparsedDocument,
   };
