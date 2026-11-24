@@ -1058,16 +1058,19 @@ export const FLUIDSIM45_PROTOTYPES: Readonly<Record<string, FluidSim45Prototype>
   // =========================================================================
   power_24v: {
     catalogType: 'power_24v',
-    fluidsimClass: 'E_U001',
-    symSource: 'sym/electr/e_u001.ct',
+    fluidsimClass: 'pol2',
+    symSource: 'sym/electr/pol2.ct',
     verified: true,
     sizeMm: { width: 8, height: 6 },
-    gdiFlags: 204808,
+    gdiFlags: 4126728,
     usesDxfSym: false,
     gates: [
       { gateIndex: 1, portName: 'OUT', connClass: 'EConnection', domain: 'electrical', role: 'power_pos', required: true, offsetMm: { x: 4, y: 6 }, normal: 'S' },
     ],
-    defaultSolverProps: [],
+    defaultSolverProps: [
+      ' F con_descr1 x_offset I 0',
+      ' F con_descr1 y_offset I 0',
+    ],
     symPrimitives: [
       { kind: 'line', x1: 1, y1: 2, x2: 7, y2: 2 },
       { kind: 'line', x1: 4, y1: 2, x2: 4, y2: 6 },
@@ -1076,16 +1079,19 @@ export const FLUIDSIM45_PROTOTYPES: Readonly<Record<string, FluidSim45Prototype>
 
   power_0v: {
     catalogType: 'power_0v',
-    fluidsimClass: 'E_U002',
-    symSource: 'sym/electr/e_u002.ct',
+    fluidsimClass: 'pol1',
+    symSource: 'sym/electr/pol1.ct',
     verified: true,
     sizeMm: { width: 8, height: 6 },
-    gdiFlags: 204808,
+    gdiFlags: 184328,
     usesDxfSym: false,
     gates: [
       { gateIndex: 1, portName: 'IN', connClass: 'EConnection', domain: 'electrical', role: 'power_neg', required: true, offsetMm: { x: 4, y: 0 }, normal: 'N' },
     ],
-    defaultSolverProps: [],
+    defaultSolverProps: [
+      ' F con_descr1 x_offset I 0',
+      ' F con_descr1 y_offset I 0',
+    ],
     symPrimitives: [
       { kind: 'line', x1: 4, y1: 0, x2: 4, y2: 4 },
       { kind: 'line', x1: 1, y1: 4, x2: 7, y2: 4 },

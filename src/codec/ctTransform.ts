@@ -294,54 +294,90 @@ export function transformSymPrimitivesMm(
 }
 
 /**
- * Encodes canonical mm primitives directly into FluidSIM 4.5 BEGINSYM `SYM <idx>` primitive lines.
- * Note: FluidSIM 4.5 applies its own object-header rotation/flip to `dxf_prim_list` SYM blocks when rendering,
- * so SYM primitives stored in `BEGINSYM` are expressed in the component's canonical local mm-scaled space
- * (1 mm = 10 SYM units, matching FluidSIM's native DXF primitive grid where 1024 raw units ≈ 1/3 mm).
+ * Encodes canonical (rot=0, flip=0) mm primitives directly into authentic FluidSIM 4.5
+ * `BEGINSYM` `SYM <idx>` numeric opcode lines (empirically verified against all 6 golden `.ct` files):
+ *   - `1 x1 y1 x2 y2`                          — line segment (dashed lines subdivided into short `1` segments)
+ *   - `3 cx cy r 0 2`                          — circle
+ *   - `4 cx cy r startAng endAng 0 0 2`        — circular arc (angles in `Math.round(deg * 1024)`)
+ *   - `5 x1 y1 x2 y2 x3 y3 x4 y4 0`            — filled 4-vertex polygon (triangles repeat vertex 3)
+ *
+ * IMPORTANT: FluidSIM 4.5 applies each object header's `rot` and `flip` natively when rendering
+ * `dxf_prim_list` / `dxf_prim_list2` SYM blocks, so `BEGINSYM` primitives MUST remain unrotated
+ * in canonical local raw units (`scale = unitPerMm`, default `FS_UNIT_PER_MM = 3072`).
  */
 export function encodeSymPrimitivesToFluidSimLines(
   primitives: readonly SymPrimitive[],
-  scale = 3,
+  unitPerMm = FS_UNIT_PER_MM,
 ): string[] {
-  const s = (v: number): number => Math.round(v * scale);
+  const s = (v: number): number => Math.round(v * unitPerMm);
   const lines: string[] = [];
 
   for (const p of primitives) {
     if (p.kind === 'line') {
-      const style = p.style ?? 0;
-      lines.push(`L ${s(p.x1)} ${s(p.y1)} ${s(p.x2)} ${s(p.y2)} 0 ${style}`);
+      if (p.style && p.style !== 0) {
+        // Subdivide dashed/dotted lines into short authentic opcode-1 dash segments
+        const dx = p.x2 - p.x1;
+        const dy = p.y2 - p.y1;
+        const len = Math.hypot(dx, dy);
+        if (len > 1e-4) {
+          const dashMm = 1.2;
+          const gapMm = 0.8;
+          const step = dashMm + gapMm;
+          for (let d = 0; d < len; d += step) {
+            const t0 = d / len;
+            const t1 = Math.min(1, (d + dashMm) / len);
+            lines.push(
+              `1 ${s(p.x1 + dx * t0)} ${s(p.y1 + dy * t0)} ${s(p.x1 + dx * t1)} ${s(p.y1 + dy * t1)}`,
+            );
+          }
+        }
+      } else {
+        lines.push(`1 ${s(p.x1)} ${s(p.y1)} ${s(p.x2)} ${s(p.y2)}`);
+      }
     } else if (p.kind === 'rect') {
       const x1 = s(p.x1);
       const y1 = s(p.y1);
       const x2 = s(p.x2);
       const y2 = s(p.y2);
       if (p.fill) {
-        lines.push(`R ${x1} ${y1} ${x2} ${y2} 0 1`);
+        lines.push(`5 ${x1} ${y1} ${x2} ${y1} ${x2} ${y2} ${x1} ${y2} 0`);
       } else {
-        lines.push(`L ${x1} ${y1} ${x2} ${y1} 0 0`);
-        lines.push(`L ${x2} ${y1} ${x2} ${y2} 0 0`);
-        lines.push(`L ${x2} ${y2} ${x1} ${y2} 0 0`);
-        lines.push(`L ${x1} ${y2} ${x1} ${y1} 0 0`);
+        lines.push(`1 ${x1} ${y1} ${x2} ${y1}`);
+        lines.push(`1 ${x2} ${y1} ${x2} ${y2}`);
+        lines.push(`1 ${x2} ${y2} ${x1} ${y2}`);
+        lines.push(`1 ${x1} ${y2} ${x1} ${y1}`);
       }
     } else if (p.kind === 'circle') {
       const cx = s(p.cx);
       const cy = s(p.cy);
       const r = Math.max(1, s(p.r));
-      lines.push(`C ${cx} ${cy} ${r} 0 ${p.fill ? 1 : 0}`);
+      lines.push(`3 ${cx} ${cy} ${r} 0 2`);
     } else if (p.kind === 'arc') {
       const cx = s(p.cx);
       const cy = s(p.cy);
       const r = Math.max(1, s(p.r));
-      lines.push(`A ${cx} ${cy} ${r} ${Math.round(p.startDeg)} ${Math.round(p.endDeg)} 0 0`);
+      const a1 = Math.round(normalizeAngleDeg(p.startDeg) * 1024);
+      const a2 = Math.round(normalizeAngleDeg(p.endDeg) * 1024);
+      lines.push(`4 ${cx} ${cy} ${r} ${a1} ${a2} 0 0 2`);
     } else if (p.kind === 'poly' && p.points.length >= 2) {
       if (p.fill && p.points.length === 3) {
         const [a, b, c] = p.points;
-        lines.push(`T ${s(a.x)} ${s(a.y)} ${s(b.x)} ${s(b.y)} ${s(c.x)} ${s(c.y)} 0 1`);
+        lines.push(`5 ${s(a.x)} ${s(a.y)} ${s(b.x)} ${s(b.y)} ${s(c.x)} ${s(c.y)} ${s(c.x)} ${s(c.y)} 0`);
+      } else if (p.fill && p.points.length === 4) {
+        const [a, b, c, d] = p.points;
+        lines.push(`5 ${s(a.x)} ${s(a.y)} ${s(b.x)} ${s(b.y)} ${s(c.x)} ${s(c.y)} ${s(d.x)} ${s(d.y)} 0`);
+      } else if (p.fill && p.points.length > 4) {
+        const a = p.points[0];
+        for (let i = 1; i < p.points.length - 1; i++) {
+          const b = p.points[i];
+          const c = p.points[i + 1];
+          lines.push(`5 ${s(a.x)} ${s(a.y)} ${s(b.x)} ${s(b.y)} ${s(c.x)} ${s(c.y)} ${s(c.x)} ${s(c.y)} 0`);
+        }
       } else {
         for (let i = 0; i < p.points.length; i++) {
           const a = p.points[i];
           const b = p.points[(i + 1) % p.points.length];
-          lines.push(`L ${s(a.x)} ${s(a.y)} ${s(b.x)} ${s(b.y)} 0 0`);
+          lines.push(`1 ${s(a.x)} ${s(a.y)} ${s(b.x)} ${s(b.y)}`);
         }
       }
     }

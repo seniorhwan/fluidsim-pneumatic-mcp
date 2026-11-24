@@ -9,11 +9,9 @@
 import type { ComponentNode } from '../contracts/circuit';
 import {
   encodeSymPrimitivesToFluidSimLines,
-  transformSymPrimitivesMm,
-  type RotationDeg,
+  FS_UNIT_PER_MM,
   type SymPrimitive,
 } from './ctTransform';
-import type { FluidSimFlippedCode } from '../contracts/circuit';
 import { getFluidSim45Prototype } from './prototypes/fluidsim45Prototypes';
 import { buildValveSymPrimitives } from './ctValveCompiler';
 
@@ -25,6 +23,10 @@ export function isDirectionalValveType(type: string): boolean {
 
 /**
  * Deduplicating allocator for `BEGINSYM .. ENDSYM` blocks in FluidSIM 4.5 `.ct` trailers.
+ *
+ * IMPORTANT: FluidSIM 4.5 natively applies object-header `rot` and `flip` to `BEGINSYM` geometry
+ * (empirically verified in `fixtures/golden/02_speed_control_throttle.ct` on rotated `DV_P1` and `CheckValveP`).
+ * Therefore, all `SYM` blocks are encoded strictly in canonical unrotated local raw units (`unitPerMm`).
  */
 export class CtSymbolAllocator {
   private readonly blocks: string[] = [];
@@ -41,27 +43,23 @@ export class CtSymbolAllocator {
     return idx;
   }
 
-  /** Registers a list of mm-domain SymPrimitives (optionally pre-transformed by D4) and returns its 0-based index. */
+  /** Registers canonical (rot=0, flip=0) mm-domain SymPrimitives scaled by `unitPerMm`. */
   registerPrimitives(
     primitives: readonly SymPrimitive[],
-    opts?: { baseW?: number; baseH?: number; rot?: RotationDeg; flipped?: FluidSimFlippedCode; scale?: number },
+    opts?: { unitPerMm?: number },
   ): number {
-    const transformed =
-      opts && (opts.rot || opts.flipped) && opts.baseW !== undefined && opts.baseH !== undefined
-        ? transformSymPrimitivesMm(primitives, opts.baseW, opts.baseH, opts.rot ?? 0, opts.flipped ?? 0)
-        : primitives;
-    const lines = encodeSymPrimitivesToFluidSimLines(transformed, opts?.scale ?? 3);
-    return this.registerLines(lines.length > 0 ? lines : ['L 0 0 10 10 0 0']);
+    const scale = opts?.unitPerMm ?? FS_UNIT_PER_MM;
+    const lines = encodeSymPrimitivesToFluidSimLines(primitives, scale);
+    return this.registerLines(lines.length > 0 ? lines : [`1 0 0 ${scale} ${scale}`]);
   }
 
   /**
-   * Allocates `dxf_prim_list` (and optional `dxf_prim_list2`) for any catalog component
-   * using `FLUIDSIM45_PROTOTYPES` or `buildValveSymPrimitives`.
+   * Allocates canonical unrotated `dxf_prim_list` (and optional `dxf_prim_list2`)
+   * for any catalog component using `FLUIDSIM45_PROTOTYPES` or `buildValveSymPrimitives`.
    */
   allocateForComponent(
     comp: ComponentNode,
-    rot: RotationDeg = 0,
-    flipped: FluidSimFlippedCode = 0,
+    unitPerMm: number = FS_UNIT_PER_MM,
   ): { dxf1?: number; dxf2?: number } {
     const proto = getFluidSim45Prototype(comp.type);
     if (!proto) return {};
@@ -73,21 +71,11 @@ export class CtSymbolAllocator {
       ? buildValveSymPrimitives(comp)
       : proto.symPrimitives;
 
-    const dxf1 = this.registerPrimitives(prims1, {
-      baseW: proto.sizeMm.width,
-      baseH: proto.sizeMm.height,
-      rot,
-      flipped,
-    });
+    const dxf1 = this.registerPrimitives(prims1, { unitPerMm });
 
     let dxf2: number | undefined;
     if (proto.usesDxfSym2 && proto.symPrimitives2 && proto.symPrimitives2.length > 0) {
-      dxf2 = this.registerPrimitives(proto.symPrimitives2, {
-        baseW: proto.sizeMm.width,
-        baseH: proto.sizeMm.height,
-        rot,
-        flipped,
-      });
+      dxf2 = this.registerPrimitives(proto.symPrimitives2, { unitPerMm });
     }
 
     return { dxf1, dxf2 };
