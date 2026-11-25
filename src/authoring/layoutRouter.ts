@@ -853,69 +853,220 @@ export function autoLayoutCircuit(
     }
   }
 
-  // 2. Electrical 24V / 0V Ladder Organizer
+  // 2. Electrical 24V / 0V Ladder Organizer (Vertical Rung-Column Tracer)
   const elecOriginX = snap(Math.max(150, maxPneuX + 24));
   const elecLayerY: Record<number, number> =
     targetSheetHeightMm >= 260
-      ? { 10: HEADER_SAFE_Y_MM, 10.5: 56, 11: 80, 12: 124, 13: 170, 14: 220 }
-      : { 10: HEADER_SAFE_Y_MM, 10.5: 50, 11: 70, 12: 104, 13: 138, 14: 174 };
+      ? { 10: HEADER_SAFE_Y_MM, 10.5: 56, 11: 82, 12: 126, 13: 174, 14: 222 }
+      : { 10: HEADER_SAFE_Y_MM, 10.5: 50, 11: 72, 12: 106, 13: 140, 14: 176 };
 
-  const layer12 = elecLayers.get(12);
-  if (layer12 && layer12.length > 0) {
-    const keep12: ComponentNode[] = [];
-    const bus24List = elecLayers.get(10.5) ?? [];
-    for (const c of layer12) {
-      const nbrs = neighborIds.get(c.id);
-      const isTop24vBus =
-        c.type === 'electrical_junction' &&
-        (c.id === 'BUS_24V' ||
-          (nbrs &&
-            Array.from(nbrs).some((nid) => {
-              const nc = compById.get(nid);
-              return nc && (nc.type === 'power_24v' || nc.label === 'ESTOP' || nc.id.includes('ESTOP'));
-            })));
-      if (isTop24vBus) bus24List.push(c);
-      else keep12.push(c);
-    }
-    if (bus24List.length > 0) elecLayers.set(10.5, bus24List);
-    elecLayers.set(12, keep12);
+  const allElecComps: ComponentNode[] = [];
+  for (const list of elecLayers.values()) {
+    allElecComps.push(...list);
   }
 
-  for (const [layer, comps] of Array.from(elecLayers.entries()).sort((a, b) => a[0] - b[0])) {
-    if (comps.length === 0) continue;
-    comps.sort((a, b) => {
-      const rank = (c: ComponentNode): number => {
-        if (c.label === 'ESTOP' || c.id.includes('ESTOP')) return 0;
-        if (c.label === 'S1' || c.id.includes('START')) return 1;
-        if (c.label === 'S2' || c.id.includes('STOP')) return 2;
-        return 3;
-      };
-      return rank(a) - rank(b) || naturalCompare(a.id, b.id);
-    });
-    const availW = Math.max(80, maxPrintableRightMm - elecOriginX);
-    const sumW = comps.reduce((s, c) => s + getRotatedDimensions(c).w, 0);
-    const gap =
-      comps.length > 1
-        ? Math.max(MIN_CLEARANCE_MM, Math.min(16, Math.floor((availW - sumW) / (comps.length - 1))))
-        : 0;
-    let cursorX = elecOriginX;
-    let baseY = elecLayerY[layer] ?? 105;
-    let rowMaxH = 0;
+  if (allElecComps.length > 0) {
+    const elecSet = new Set(allElecComps.map((c) => c.id));
+    const power24Comps = allElecComps.filter((c) => c.type === 'power_24v');
+    const power0Comps = allElecComps.filter((c) => c.type === 'power_0v');
+    const LOAD_TYPES = new Set([
+      'relay_coil',
+      'timer_relay_on_delay',
+      'timer_relay_off_delay',
+      'electrical_counter',
+      'valve_solenoid',
+      'indicator_lamp',
+    ]);
+    const loadComps = allElecComps
+      .filter((c) => LOAD_TYPES.has(c.type))
+      .sort((a, b) => {
+        const typeRank = (t: string): number =>
+          t === 'relay_coil'
+            ? 0
+            : t === 'timer_relay_on_delay' || t === 'timer_relay_off_delay'
+              ? 1
+              : t === 'electrical_counter'
+                ? 2
+                : t === 'valve_solenoid'
+                  ? 3
+                  : 4;
+        return typeRank(a.type) - typeRank(b.type) || naturalCompare(a.label || a.id, b.label || b.id);
+      });
 
-    for (const comp of comps) {
-      const { w, h } = getRotatedDimensions(comp);
-      if (cursorX > elecOriginX && cursorX + w > maxPrintableRightMm) {
-        cursorX = elecOriginX;
-        baseY = snap(baseY + Math.max(rowMaxH, 10) + 8);
-        rowMaxH = 0;
+    // Identify global 24V / 0V bus junctions so rung tracing does not bleed across all rungs
+    const bus24Ids = new Set<string>();
+    const bus0Ids = new Set<string>();
+    const estopIds = new Set<string>();
+    for (const c of allElecComps) {
+      if (c.label === 'ESTOP' || c.id.toUpperCase().includes('ESTOP')) {
+        estopIds.add(c.id);
       }
-      comp.layout = {
-        x: Math.round(cursorX),
-        y: snap(baseY),
-        rotationDeg: getEffectiveRotationDeg(comp),
-      };
-      rowMaxH = Math.max(rowMaxH, h);
-      cursorX = comp.layout.x + w + gap;
+      if (c.type !== 'electrical_junction') continue;
+      const nbrs = Array.from(neighborIds.get(c.id) ?? []).filter((nid) => elecSet.has(nid));
+      const touches24 = nbrs.some((nid) => {
+        const nc = compById.get(nid);
+        return nc && (nc.type === 'power_24v' || nc.label === 'ESTOP' || nc.id.toUpperCase().includes('ESTOP'));
+      });
+      const touches0 = nbrs.some((nid) => compById.get(nid)?.type === 'power_0v');
+      if (c.id === 'BUS_24V' || (touches24 && nbrs.length >= 3)) bus24Ids.add(c.id);
+      else if (c.id === 'BUS_0V' || (touches0 && nbrs.length >= 3)) bus0Ids.add(c.id);
+    }
+
+    const railBarrierIds = new Set<string>([
+      ...power24Comps.map((c) => c.id),
+      ...power0Comps.map((c) => c.id),
+      ...bus24Ids,
+      ...bus0Ids,
+      ...estopIds,
+    ]);
+
+    // Trace each load upward through switches/contacts/local junctions to group components into vertical rungs
+    const rungMembers: ComponentNode[][] = loadComps.map((lc) => [lc]);
+    const assignedRung = new Map<string, number>();
+    loadComps.forEach((lc, idx) => assignedRung.set(lc.id, idx));
+
+    const elecEdges = normalizedDoc.connections.filter(
+      (e) => e.domain === 'electrical' && elecSet.has(e.from.componentId) && elecSet.has(e.to.componentId),
+    );
+    const elecAdj = new Map<string, string[]>();
+    for (const e of elecEdges) {
+      const a = elecAdj.get(e.from.componentId) ?? [];
+      a.push(e.to.componentId);
+      elecAdj.set(e.from.componentId, a);
+      const b = elecAdj.get(e.to.componentId) ?? [];
+      b.push(e.from.componentId);
+      elecAdj.set(e.to.componentId, b);
+    }
+
+    // Multi-source BFS from each load upward so every contact/switch lands directly above its driven coil/solenoid
+    const depthFromLoad = new Map<string, number>();
+    const queue: Array<{ id: string; rungIdx: number; depth: number }> = [];
+    loadComps.forEach((lc, idx) => {
+      depthFromLoad.set(lc.id, 0);
+      queue.push({ id: lc.id, rungIdx: idx, depth: 0 });
+    });
+
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      for (const nid of elecAdj.get(cur.id) ?? []) {
+        if (railBarrierIds.has(nid) || LOAD_TYPES.has(compById.get(nid)?.type ?? '')) continue;
+        if (!assignedRung.has(nid)) {
+          assignedRung.set(nid, cur.rungIdx);
+          depthFromLoad.set(nid, cur.depth + 1);
+          const nc = compById.get(nid);
+          if (nc) rungMembers[cur.rungIdx].push(nc);
+          queue.push({ id: nid, rungIdx: cur.rungIdx, depth: cur.depth + 1 });
+        }
+      }
+    }
+
+    // Any remaining unassigned non-rail electrical components get appended as extra rungs
+    for (const c of allElecComps) {
+      if (railBarrierIds.has(c.id) || assignedRung.has(c.id)) continue;
+      const idx = rungMembers.length;
+      assignedRung.set(c.id, idx);
+      depthFromLoad.set(c.id, 1);
+      rungMembers.push([c]);
+    }
+
+    const rungCount = Math.max(1, rungMembers.length);
+    // Guarantee every rung column has enough horizontal clearance (width + MIN_CLEARANCE_MM)
+    // so resolveBoundingBoxOverlaps never pushes contacts/coils sideways into neighboring rungs.
+    let maxRungCompW = 14;
+    let maxLogicStack = 0;
+    for (const members of rungMembers) {
+      let logicCount = 0;
+      for (const m of members) {
+        const { w } = getRotatedDimensions(m);
+        maxRungCompW = Math.max(maxRungCompW, w + getVisualPaddingRightMm(m));
+        if (!LOAD_TYPES.has(m.type)) logicCount++;
+      }
+      maxLogicStack = Math.max(maxLogicStack, logicCount);
+    }
+    const minSafeColPitch = snap(Math.max(25, maxRungCompW + MIN_CLEARANCE_MM + GRID_MM));
+    const availW = Math.max(100, maxPrintableRightMm - elecOriginX);
+    const colPitch = Math.max(
+      minSafeColPitch,
+      Math.min(35, snap(Math.floor(availW / Math.max(1, rungCount)))),
+    );
+
+    const rail24Y = snap(elecLayerY[10]);
+    const bus24Y = snap(rail24Y + 20);
+    const topLogicY = snap(bus24Y + 20);
+    const safeStepY = 25; // >= max contact height (14mm) + MIN_CLEARANCE_MM (5mm) + grid snap
+    const requiredLoadY = snap(topLogicY + Math.max(1, maxLogicStack) * safeStepY + 10);
+    const loadY = Math.max(snap(elecLayerY[13]), requiredLoadY);
+    const rail0Y = snap(loadY + 30);
+
+    // Place 24V supply + ESTOP neatly on top-left rail
+    let topCursorX = elecOriginX;
+    for (const p24 of power24Comps) {
+      const { w } = getRotatedDimensions(p24);
+      p24.layout = { x: snap(topCursorX), y: rail24Y, rotationDeg: getEffectiveRotationDeg(p24) };
+      topCursorX = snap(p24.layout.x + w + 15);
+    }
+    for (const eid of estopIds) {
+      const ec = compById.get(eid);
+      if (!ec) continue;
+      const { w } = getRotatedDimensions(ec);
+      ec.layout = { x: snap(topCursorX), y: rail24Y, rotationDeg: getEffectiveRotationDeg(ec) };
+      topCursorX = snap(ec.layout.x + w + 15);
+    }
+    let bus24X = Math.max(snap(elecOriginX + 15), topCursorX);
+    for (const bid of bus24Ids) {
+      const bc = compById.get(bid);
+      if (!bc) continue;
+      const { w } = getRotatedDimensions(bc);
+      bc.layout = { x: snap(bus24X), y: bus24Y, rotationDeg: getEffectiveRotationDeg(bc) };
+      bus24X = snap(bc.layout.x + w + 20);
+    }
+
+    // Place each rung vertically aligned along its column axis
+    for (let r = 0; r < rungMembers.length; r++) {
+      const members = rungMembers[r];
+      const colLeftX = snap(elecOriginX + r * colPitch);
+      const loadsInRung = members.filter((m) => LOAD_TYPES.has(m.type));
+      const logicInRung = members
+        .filter((m) => !LOAD_TYPES.has(m.type))
+        .sort((a, b) => (depthFromLoad.get(b.id) ?? 0) - (depthFromLoad.get(a.id) ?? 0) || naturalCompare(a.id, b.id));
+
+      // Place loads cleanly on loadY at colLeftX
+      for (const lc of loadsInRung) {
+        lc.layout = {
+          x: colLeftX,
+          y: loadY,
+          rotationDeg: getEffectiveRotationDeg(lc),
+        };
+      }
+
+      // Place upstream logic contacts/switches/local junctions stacked cleanly down the same column
+      const count = logicInRung.length;
+      if (count > 0) {
+        for (let i = 0; i < count; i++) {
+          const comp = logicInRung[i];
+          const y = count === 1 ? snap(topLogicY + Math.floor((loadY - topLogicY) * 0.4)) : snap(topLogicY + i * safeStepY);
+          comp.layout = {
+            x: colLeftX,
+            y: Math.min(loadY - 20, y),
+            rotationDeg: getEffectiveRotationDeg(comp),
+          };
+        }
+      }
+    }
+
+    // Place 0V supply and 0V bus rail cleanly below all loads
+    let botCursorX = elecOriginX;
+    for (const p0 of power0Comps) {
+      const { w } = getRotatedDimensions(p0);
+      p0.layout = { x: snap(botCursorX), y: rail0Y, rotationDeg: getEffectiveRotationDeg(p0) };
+      botCursorX = snap(p0.layout.x + w + 20);
+    }
+    for (const bid of bus0Ids) {
+      const bc = compById.get(bid);
+      if (!bc) continue;
+      const { w } = getRotatedDimensions(bc);
+      bc.layout = { x: snap(botCursorX), y: rail0Y, rotationDeg: getEffectiveRotationDeg(bc) };
+      botCursorX = snap(bc.layout.x + w + 20);
     }
   }
 
@@ -925,11 +1076,7 @@ export function autoLayoutCircuit(
     comp.layout.x = snap(comp.layout.x);
     comp.layout.y = snap(comp.layout.y);
   }
-  const wrapLimitX = hasElectricalComponents
-    ? targetSheetWidthMm >= 400
-      ? maxPrintableRightMm
-      : undefined
-    : pneuMaxRightMm;
+  const wrapLimitX = hasElectricalComponents ? undefined : pneuMaxRightMm;
   resolveBoundingBoxOverlaps(components, wrapLimitX, hasElectricalComponents ? elecOriginX : undefined);
 
   // Recompute sheet bounds after overlap resolution

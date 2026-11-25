@@ -659,7 +659,9 @@ export function parseCtContainerToDocument(
     const objGates = (gatesByParent.get(objIdx) ?? []).sort((a, b) => a.gateNum - b.gateNum);
 
     const rotDeg = normalizeRotation(obj.rot);
-    const flipCode = (obj.flip === 1 || obj.flip === 2 || obj.flip === 3 ? obj.flip : 0) as FluidSimFlippedCode;
+    const propFlip = getNumberProp(obj.props, 'FLIPPED', 0);
+    const rawFlip = propFlip === 1 || propFlip === 2 || propFlip === 3 ? propFlip : obj.flip;
+    const flipCode = (rawFlip === 1 || rawFlip === 2 || rawFlip === 3 ? rawFlip : 0) as FluidSimFlippedCode;
     const layout = {
       x: rawToMmX(obj.x1),
       y: rawToMmY(obj.y1),
@@ -1425,7 +1427,9 @@ export function parseCtContainerToDocument(
 
     if (node) {
       // Restore v2 mirror / flipped / group / sectionLabel metadata
-      const flipVal = (obj.flip === 1 || obj.flip === 2 || obj.flip === 3 ? obj.flip : 0) as FluidSimFlippedCode;
+      const propFlip2 = getNumberProp(obj.props, 'FLIPPED', 0);
+      const rawFlip2 = propFlip2 === 1 || propFlip2 === 2 || propFlip2 === 3 ? propFlip2 : obj.flip;
+      const flipVal = (rawFlip2 === 1 || rawFlip2 === 2 || rawFlip2 === 3 ? rawFlip2 : 0) as FluidSimFlippedCode;
       if (flipVal !== 0) {
         node.flipped = flipVal;
         node.mirror = flippedCodeToMirror(flipVal);
@@ -1759,14 +1763,16 @@ export function parseCtContainerToDocument(
     }
   }
 
-  // Synthesize exhaust_silencer (EX1/EX2/EX3) or blind_plug (EX4) nodes for unconnected PConnections
+  // Synthesize exhaust_silencer (EX1/EX2/EX3) or blind_plug (EX1+closed / EX4 / _MCP_PLUG_ID) nodes for unconnected PConnections
   for (let objIdx = 0; objIdx < ast.objects.length; objIdx++) {
     const obj = ast.objects[objIdx];
     if (obj.cls !== 'PConnection') continue;
     if (connectedPortObjIndices.has(objIdx)) continue;
     const exType = getScalarProp(obj.props, 'ex_type');
-    const isExhaust = exType === 'EX3' || exType === 'EX2' || exType === 'EX1';
-    const isPlug = exType === 'EX4';
+    const isClosed = getBoolProp(obj.props, 'closed');
+    const hasPlugId = getScalarProp(obj.props, '_MCP_PLUG_ID') !== undefined;
+    const isPlug = exType === 'EX4' || isClosed || hasPlugId;
+    const isExhaust = !isPlug && (exType === 'EX3' || exType === 'EX2' || exType === 'EX1');
     if (!isExhaust && !isPlug) continue;
 
     const ep = resolveEndpoint(objIdx);
@@ -1787,7 +1793,7 @@ export function parseCtContainerToDocument(
           x: rawToMmX(obj.x1),
           y: rawToMmY(obj.y1),
         },
-        rawMetadata: { embeddedExType: 'EX4', ownerPortObjId: obj.objId },
+        rawMetadata: { embeddedExType: exType || 'EX1', ownerPortObjId: obj.objId },
       });
       connections.push({
         id: plugEdgeId,
@@ -1870,6 +1876,40 @@ export function parseCtContainerToDocument(
         ? ('DIN_A4_PORTRAIT' as const)
         : ('DIN_A4_LANDSCAPE' as const);
 
+  // For native pneumatic-only FluidSIM .ct sheets (e.g. Festo MPS pneumatic schematics whose PLC/relay
+  // sheet is separate), auto-infer pneumatic-only + allowExternalElectricalSheet unless explicitly specified.
+  const ELECTRICAL_COMPONENT_TYPES = new Set([
+    'power_24v',
+    'power_0v',
+    'electrical_junction',
+    'pushbutton_no',
+    'pushbutton_nc',
+    'limit_switch_no',
+    'limit_switch_nc',
+    'proximity_switch_magnetic',
+    'relay_coil',
+    'timer_relay_on_delay',
+    'timer_relay_off_delay',
+    'electrical_counter',
+    'relay_contact_no',
+    'relay_contact_nc',
+    'relay_contact_changeover',
+    'valve_solenoid',
+    'indicator_lamp',
+  ]);
+  const hasAnyElectricalComp = components.some((c) => ELECTRICAL_COMPONENT_TYPES.has(c.type));
+  const hasSolenoidValve = components.some(
+    (c) => c.leftActuation?.type === 'solenoid' || c.rightActuation?.type === 'solenoid',
+  );
+  const inferredSheetDomain =
+    explicitSheetDomain ?? (!hasAnyElectricalComp && components.length > 0 ? ('pneumatic-only' as const) : undefined);
+  const inferredAllowExtElec =
+    explicitAllowExtElec !== undefined
+      ? explicitAllowExtElec
+      : !hasAnyElectricalComp && hasSolenoidValve
+        ? true
+        : undefined;
+
   const metadata: CircuitDocument['metadata'] = {
     title: detectedTitle || fallbackTitle,
     fluidsimVersion: '4.5',
@@ -1877,8 +1917,8 @@ export function parseCtContainerToDocument(
     sheetWidthMm: inferredWidth,
     sheetHeightMm: inferredHeight,
     sheetSize,
-    ...(explicitSheetDomain ? { sheetDomain: explicitSheetDomain } : {}),
-    ...(explicitAllowExtElec !== undefined ? { allowExternalElectricalSheet: explicitAllowExtElec } : {}),
+    ...(inferredSheetDomain ? { sheetDomain: inferredSheetDomain } : {}),
+    ...(inferredAllowExtElec !== undefined ? { allowExternalElectricalSheet: inferredAllowExtElec } : {}),
   };
 
   const originalSemanticFingerprint = computeSemanticFingerprint({

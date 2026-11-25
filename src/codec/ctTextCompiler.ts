@@ -87,56 +87,132 @@ function lampColorToRgbInt(color: string): number {
   }
 }
 
+function dedupeCtProps(props: string[]): string[] {
+  const lLines: string[] = [];
+  const otherLines: string[] = [];
+  const seenScalar = new Set<string>();
+  const seenField = new Set<string>();
+
+  for (const line of props) {
+    if (line.startsWith('L ') || line.startsWith(' L ')) {
+      lLines.push(line.startsWith('L ') ? line : line.slice(1));
+      continue;
+    }
+    const mScalar = line.match(/^\s+S\s+(\S+)\s+/);
+    if (mScalar) {
+      const key = mScalar[1];
+      if (seenScalar.has(key)) continue;
+      seenScalar.add(key);
+      otherLines.push(line);
+      continue;
+    }
+    const mField = line.match(/^\s+F\s+(\S+)\s+(\S+)\s+/);
+    if (mField) {
+      const key = `${mField[1]}::${mField[2]}`;
+      if (seenField.has(key)) continue;
+      seenField.add(key);
+      otherLines.push(line);
+      continue;
+    }
+    otherLines.push(line);
+  }
+  return [...lLines, ...otherLines];
+}
+
+function buildPConnectionProps(options: {
+  exType?: 'EX0' | 'EX1' | 'EX3';
+  closed?: boolean;
+  hidden?: boolean;
+  extraProps?: string[];
+}): string[] {
+  const exType = options.exType ?? 'EX0';
+  const rh = exType === 'EX3' ? 0.005 : 0;
+  const props: string[] = [
+    ' S ex_type_FEST B T',
+    ` S ex_type S ${exType}`,
+    ' S R_H_FEST B T',
+    ` S R_H F ${rh}`,
+  ];
+  if (options.closed) {
+    props.push(' S closed B T');
+  }
+  if (options.hidden) {
+    props.push(' S state INT 4');
+  }
+  if (options.extraProps && options.extraProps.length > 0) {
+    props.push(...options.extraProps);
+  }
+  return dedupeCtProps(props);
+}
+
 function buildComponentSolverProps(comp: ComponentNode): string[] {
   const props: string[] = [];
   const p = comp.params;
   switch (comp.type) {
     case 'air_source':
+      props.push(' S P_LIM_FEST B T');
       props.push(` S P_LIM F ${typeof p.pressureBar === 'number' ? p.pressureBar : 6.0}`);
+      props.push(' S FLOW_FEST B T');
       props.push(` S FLOW F ${typeof p.maxFlowLMin === 'number' ? p.maxFlowLMin : 1000}`);
       break;
     case 'air_service_unit':
+      props.push(' S NN_FLOW_FEST B T');
+      props.push(` S NN_FLOW F ${typeof p.nominalFlowLMin === 'number' ? p.nominalFlowLMin : 750}`);
+      props.push(' S P_SOLL_FEST B T');
       props.push(` S P_SOLL F ${typeof p.nominalPressureBar === 'number' ? p.nominalPressureBar : 6.0}`);
       break;
     case 'air_filter':
+      props.push(' S NN_FLOW_FEST B T');
       props.push(` S NN_FLOW F ${typeof p.nominalFlowLMin === 'number' ? p.nominalFlowLMin : 500}`);
       break;
     case 'pressure_regulator':
+      props.push(' S P_SOLL_FEST B T');
       props.push(` S P_SOLL F ${typeof p.setPressureBar === 'number' ? p.setPressureBar : 4.0}`);
       break;
     case 'pressure_relief_valve':
+      props.push(' S P_SOLL_FEST B T');
       props.push(` S P_SOLL F ${typeof p.reliefPressureBar === 'number' ? p.reliefPressureBar : 6.0}`);
       break;
     case 'flow_control_one_way':
+      props.push(' S LEVEL_FEST B T');
       props.push(` S LEVEL F ${typeof p.openingPct === 'number' ? p.openingPct : 50}`);
       if (p.freeFlowDirection === '2_to_1') props.push(' S _MCP_FREE_FLOW S 2_to_1');
       break;
     case 'throttle_valve':
+      props.push(' S LEVEL_FEST B T');
+      props.push(` S LEVEL F ${typeof p.openingPct === 'number' ? p.openingPct : 50}`);
+      break;
     case 'nozzle':
     case 'orifice':
-      props.push(` S LEVEL F ${typeof p.openingPct === 'number' ? p.openingPct : 50}`);
+      props.push(' S NN_FLOW_FEST B T');
+      props.push(` S NN_FLOW F ${typeof p.openingPct === 'number' ? Math.max(5, Math.round(p.openingPct)) : 40}`);
       if (comp.type === 'orifice') props.push(' S _MCP_TYPE S orifice');
       break;
     case 'check_valve':
     case 'check_valve_spring':
     case 'check_valve_pilot_open':
+      props.push(' S P_V_FEST B T');
       props.push(
         ` S P_V F ${typeof p.crackingPressureBar === 'number' ? p.crackingPressureBar : comp.type === 'check_valve' ? 0.1 : 0.2}`,
       );
       break;
     case 'air_reservoir':
-      props.push(` S V F ${typeof p.volumeL === 'number' ? p.volumeL : 1.0}`);
+      props.push(' S VOLUME_FEST B T');
+      props.push(` S VOLUME F ${typeof p.volumeL === 'number' ? p.volumeL : 1.0}`);
       break;
     case 'time_delay_valve': {
       const delayMs = typeof p.delayMs === 'number' ? p.delayMs : 1000;
+      props.push(' S DELAY_TIME_FEST B T');
       props.push(` S DELAY_TIME F ${Math.max(1, Math.round(delayMs / 100))}`);
       break;
     }
     case 'pressure_sequence_valve':
+      props.push(' S P_SOLL_FEST B T');
       props.push(` S P_SOLL F ${typeof p.thresholdBar === 'number' ? p.thresholdBar : 4.0}`);
       break;
     case 'pressure_switch_differential':
     case 'pressure_switch_pew':
+      props.push(' S P_SOLL_FEST B T');
       props.push(
         ` S P_SOLL F ${typeof p.pressureBar === 'number' ? p.pressureBar : comp.type === 'pressure_switch_pew' ? 2.5 : -0.5}`,
       );
@@ -160,27 +236,71 @@ function buildComponentSolverProps(comp: ComponentNode): string[] {
       const rod = typeof p.rodDiameterMm === 'number' ? p.rodDiameterMm : 8;
       const areaCap = Number((Math.PI * (bore / 20) ** 2).toFixed(5));
       const areaRing = Number(Math.max(0.05, areaCap - Math.PI * (rod / 20) ** 2).toFixed(5));
-      props.push(` S HUB F ${stroke}`);
-      props.push(` S A_K F ${areaCap}`);
-      props.push(` S A_R F ${isRodless ? areaCap : areaRing}`);
-      props.push(` S F F ${typeof p.externalLoadN === 'number' ? p.externalLoadN : 0}`);
-      props.push(` S S F ${typeof p.initialPositionMm === 'number' ? p.initialPositionMm : 0}`);
-      if (isSingle) {
-        props.push(' S SPRING_R B T');
-        if (typeof p.springForceN === 'number' && p.springForceN !== 25) {
-          props.push(` S _MCP_SPRING_N F ${p.springForceN}`);
-        }
-      }
-      if (isRodless) {
-        props.push(' S SLEDGE B T');
-      }
-      if (p.cushioning === true) {
-        props.push(' S DAMPING_L B T', ' S DAMPING_R B T');
+      const extLoad = typeof p.externalLoadN === 'number' ? p.externalLoadN : 0;
+      const initPos = typeof p.initialPositionMm === 'number' ? p.initialPositionMm : 0;
+      const hasDamping = p.cushioning === true;
+      props.push(
+        ' S ALPHA_FEST B T',
+        ' S ALPHA F 0',
+        ' S FRICTION_FEST B T',
+        ' S FRICTION F 0',
+        ' S FRICTION_BA_FEST B T',
+        ' S FRICTION_BA F 0',
+        ' S FRICTION_SEL I 0',
+        ' S GLEAK_FEST B T',
+        ' S GLEAK F 0',
+        ' S MASS_FEST B T',
+        ' S MASS F 0',
+        ' S A_K_RIGHT_FEST B T',
+        ' S A_K_RIGHT F -1',
+        ' S A_R_LEFT_FEST B T',
+        ' S A_R_LEFT F -1',
+        ' S piston_FEST B T',
+        ` S piston S ${isSingle ? 'CP' : 'CP_CA'}`,
+        ' F piston x_pos I 0',
+        ' F piston y_pos I -8',
+        ' F piston stroke I 38',
+        ' F piston length I 74',
+        ' F piston f_offset_x I 7',
+        ' F piston f_offset_y I -3',
+        ' F piston only_top_rule B FALSE',
+        ' F piston both_sides_rule B FALSE',
+        ' S F_FEST B T',
+        ` S F F ${extLoad}`,
+        ' S S_RESET_FEST B T',
+        ` S S_RESET F ${initPos}`,
+        ' S S_FEST B T',
+        ` S S F ${initPos}`,
+        ' S HUB_FEST B T',
+        ` S HUB F ${stroke}`,
+        ' S A_R_FEST B T',
+        ` S A_R F ${isRodless ? areaCap : areaRing}`,
+        ' S A_K_FEST B T',
+        ` S A_K F ${areaCap}`,
+        ' S CONSTANT_FORCE B T',
+        ' S FORCE_PROFILE_FEST B T',
+        ' S FORCE_PROFILE S 0 0;5000 0;',
+        ' S SENSING B T',
+        ` S SLEDGE B ${isRodless ? 'T' : 'F'}`,
+        ' S PISTON_COUNT I 1',
+        ` S PISTON_R B ${isRodless ? 'F' : 'T'}`,
+        ` S SPRING_R B ${isSingle ? 'T' : 'F'}`,
+        ` S DAMPING_ADJ_R B ${hasDamping ? 'T' : 'F'}`,
+        ` S DAMPING_ADJ_L B ${hasDamping ? 'T' : 'F'}`,
+        ` S DAMPING_R B ${hasDamping ? 'T' : 'F'}`,
+        ` S DAMPING_L B ${hasDamping ? 'T' : 'F'}`,
+        ' F con_descr1 x_offset I -10',
+        ' F con_descr1 y_offset I 6',
+        ...(isSingle ? [] : [' F con_descr2 x_offset I 14', ' F con_descr2 y_offset I 6']),
+      );
+      if (isSingle && typeof p.springForceN === 'number' && p.springForceN !== 25) {
+        props.push(` S _MCP_SPRING_N F ${p.springForceN}`);
       }
       break;
     }
     case 'swivel_drive': {
       const alpha = typeof p.maxAngleDeg === 'number' ? p.maxAngleDeg : 180;
+      props.push(' S ALPHA_FEST B T');
       props.push(` S ALPHA F ${alpha}`);
       if (typeof p.initialAngleDeg === 'number' && p.initialAngleDeg !== 0) {
         props.push(` S _MCP_INIT_DEG F ${p.initialAngleDeg}`);
@@ -211,11 +331,13 @@ function buildComponentSolverProps(comp: ComponentNode): string[] {
     case 'timer_relay_on_delay':
     case 'timer_relay_off_delay': {
       const delayMs = typeof p.delayMs === 'number' ? p.delayMs : 1000;
+      props.push(' S DELAY_TIME_FEST B T');
       props.push(` S DELAY_TIME F ${Math.max(1, Math.round(delayMs / 100))}`);
       break;
     }
     case 'electrical_counter':
-      props.push(` S N I ${typeof p.presetCount === 'number' ? p.presetCount : 3}`);
+      props.push(' S N_FEST B T');
+      props.push(` S N F ${typeof p.presetCount === 'number' ? p.presetCount : 3}`);
       break;
     case 'indicator_lamp':
       props.push(` S sig_color I ${lampColorToRgbInt(typeof p.color === 'string' ? p.color : 'green')}`);
@@ -286,8 +408,8 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     Math.max(originOffsetY, Math.round(originOffsetY + Math.max(0, mm - 32) * unitPerMm));
   const lenToRaw = (mm: number): number => Math.max(2048, Math.round(mm * unitPerMm));
 
-  // 3. Identify standalone exhaust_silencer & blind_plug nodes attached to a single host port -> embed as EX3/EX4
-  const embeddedExhByHostPort = new Map<string, { exhId: string; edgeId: string; exType: 'EX3' | 'EX4' }>();
+  // 3. Identify standalone exhaust_silencer & blind_plug nodes attached to a single host port -> embed as EX3/EX1(+closed)
+  const embeddedExhByHostPort = new Map<string, { exhId: string; edgeId: string; exType: 'EX3' | 'EX1'; closed: boolean }>();
   const collapsedCompIds = new Set<string>();
   const collapsedEdgeIds = new Set<string>();
 
@@ -313,7 +435,8 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     embeddedExhByHostPort.set(`${hostId}::${hostPort}`, {
       exhId: c.id,
       edgeId: edge.id,
-      exType: c.type === 'blind_plug' ? 'EX4' : 'EX3',
+      exType: c.type === 'blind_plug' ? 'EX1' : 'EX3',
+      closed: c.type === 'blind_plug',
     });
     collapsedCompIds.add(c.id);
     collapsedEdgeIds.add(edge.id);
@@ -386,9 +509,14 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     y2: titleY2,
     rot: 0,
     flip: 0,
-    flags: 0,
+    flags: 1167363,
     props: [
+      ' S text_FEST B T',
       ` S text S ${titleText}`,
+      ' S height I 16',
+      ' S color I 0',
+      ' S font_name_FEST B T',
+      ' S font_name S Arial',
       ` S _MCP_SHEET_W F ${sheetWidthMm}`,
       ` S _MCP_SHEET_H F ${sheetHeightMm}`,
       ` S _MCP_UNIT_PER_MM I ${unitPerMm}`,
@@ -486,23 +614,27 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         let leftPid = -1;
         let rightPid = -1;
         for (const gc of gateCoords) {
-          const pProps: string[] = [];
+          const extraPProps: string[] = [];
           if (gc.isManifoldPort && assignedPort) {
-            pProps.push(` S _MCP_MANIFOLD_PORT S ${assignedPort}`);
+            extraPProps.push(` S _MCP_MANIFOLD_PORT S ${assignedPort}`);
             if (embedded) {
-              pProps.push(` S ex_type S ${embedded.exType}`);
-              pProps.push(
-                embedded.exType === 'EX4'
+              extraPProps.push(
+                embedded.closed
                   ? ` S _MCP_PLUG_ID S ${embedded.exhId}`
                   : ` S _MCP_EXH_ID S ${embedded.exhId}`,
               );
-              pProps.push(
-                embedded.exType === 'EX4'
+              extraPProps.push(
+                embedded.closed
                   ? ` S _MCP_PLUG_EDGE_ID S ${embedded.edgeId}`
                   : ` S _MCP_EXH_EDGE_ID S ${embedded.edgeId}`,
               );
             }
           }
+          const pProps = buildPConnectionProps({
+            exType: gc.isManifoldPort && embedded ? embedded.exType : 'EX0',
+            closed: gc.isManifoldPort && embedded ? embedded.closed : false,
+            extraProps: extraPProps,
+          });
           const pid = pushObj({
             cls: 'PConnection',
             x1: gc.px - 5120,
@@ -610,10 +742,17 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
               }
             }
           }
+          for (const obs of routingObstacles) {
+            if (candY + half + 1024 > obs.y1 && candY - half - 1024 < obs.y2) {
+              for (const sx of xs) {
+                if (sx + half + 1024 > obs.x1 && sx - half - 1024 < obs.x2) return true;
+              }
+            }
+          }
           return false;
         };
         if (collidesAtY(railY)) {
-          for (let step = 1; step <= 24; step++) {
+          for (let step = 1; step <= 32; step++) {
             const c1 = baseSy + searchDir * step * 6144;
             if (c1 >= originOffsetY + half && c1 <= printable.maxY - half - 4096 && !collidesAtY(c1)) {
               railY = c1;
@@ -663,10 +802,14 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
           let leftPid = -1;
           let rightPid = -1;
           for (const gd of gateDefs) {
-            const pProps: string[] = [];
+            const extraPProps: string[] = [];
             if (gd.isTap) {
-              pProps.push(` S _MCP_ELEC_RAIL_PORT S ${item.myPort}`);
+              extraPProps.push(` S _MCP_ELEC_RAIL_PORT S ${item.myPort}`);
             }
+            const pProps =
+              connCls === 'PConnection'
+                ? buildPConnectionProps({ exType: 'EX0', extraProps: extraPProps })
+                : extraPProps;
             const pid = pushObj({
               cls: connCls,
               x1: sx - 5120,
@@ -753,21 +896,28 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       for (const gd of gateDefs) {
         const px = cx;
         const py = cy;
-        const pProps: string[] = [];
+        const extraPProps: string[] = [];
         const embedded = embeddedExhByHostPort.get(`${comp.id}::${gd.portName}`);
         if (embedded) {
-          pProps.push(` S ex_type S ${embedded.exType}`);
-          pProps.push(
-            embedded.exType === 'EX4'
+          extraPProps.push(
+            embedded.closed
               ? ` S _MCP_PLUG_ID S ${embedded.exhId}`
               : ` S _MCP_EXH_ID S ${embedded.exhId}`,
           );
-          pProps.push(
-            embedded.exType === 'EX4'
+          extraPProps.push(
+            embedded.closed
               ? ` S _MCP_PLUG_EDGE_ID S ${embedded.edgeId}`
               : ` S _MCP_EXH_EDGE_ID S ${embedded.edgeId}`,
           );
         }
+        const pProps =
+          connCls === 'PConnection'
+            ? buildPConnectionProps({
+                exType: embedded ? embedded.exType : 'EX0',
+                closed: embedded ? embedded.closed : false,
+                extraProps: extraPProps,
+              })
+            : extraPProps;
         const pid = pushObj({
           cls: connCls,
           x1: px - 5120,
@@ -812,9 +962,14 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     }
     const extraClassProps: string[] = [];
     if (cls.startsWith('PConnection:')) {
-      const exType = cls.split(':')[1] ?? 'EX3';
+      const exType = cls.split(':')[1] === 'EX1' ? 'EX1' : 'EX3';
       cls = 'PConnection';
-      extraClassProps.push(` S ex_type S ${exType}`);
+      extraClassProps.push(
+        ...buildPConnectionProps({
+          exType,
+          closed: comp.type === 'blind_plug',
+        }),
+      );
     }
     if (comp.type === 'vacuum_suction_nozzle') {
       extraClassProps.push(` S _MCP_ORIG_ROT I ${rot}`);
@@ -840,19 +995,21 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
           ? normalizeRotationDeg(rot + 90)
           : rot;
 
-    const { dxf1, dxf2 } = symAlloc.allocateForComponent(comp, emittedRot, flip);
+    const { dxf1, dxf2 } = symAlloc.allocateForComponent(comp, unitPerMm);
 
-    const objProps: string[] = [
+    const objProps: string[] = dedupeCtProps([
       ...commonMcpProps,
+      ...(flip > 0 ? [` S FLIPPED I ${flip}`] : []),
       ...(comp.label ? [` S label S ${comp.label}`] : []),
+      ...(dxf1 !== undefined ? [` S dxf_prim_list V ${dxf1}`] : []),
+      ...(dxf2 !== undefined ? [` S dxf_prim_list2 V ${dxf2}`] : []),
       ...extraClassProps,
       ...(compiledValve
         ? [...compiledValve.props, ...compiledValve.conDescrProps]
         : [...buildComponentSolverProps(comp), ...(proto?.defaultSolverProps ?? [])]),
-      ...(dxf1 !== undefined ? [` S dxf_prim_list V ${dxf1}`] : []),
-      ...(dxf2 !== undefined ? [` S dxf_prim_list2 V ${dxf2}`] : []),
-    ];
+    ]);
 
+    const col7FlipOffset = compiledValve ? compiledValve.flipOffset : 0;
     const compObjId = pushObj({
       cls,
       x1,
@@ -860,7 +1017,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       x2,
       y2,
       rot: emittedRot,
-      flip,
+      flip: col7FlipOffset,
       flags: gdiFlags,
       props: objProps,
     });
@@ -873,29 +1030,50 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
           .filter((g) => g.portName !== '3')
           .map((g, idx) => ({ ...g, gateIndex: idx + 1 }))
       : (proto?.gates ?? []);
+    const wiredPorts = wiredPortsByComp.get(comp.id) ?? new Set<string>();
     for (const g of gates) {
       const tPos = transformPoint(g.offsetMm.x, g.offsetMm.y, baseW, baseH, emittedRot, flip);
       const tNorm = transformNormal(g.normal, emittedRot, flip);
       const px = x1 + Math.round(tPos.x * unitPerMm);
       const py = y1 + Math.round(tPos.y * unitPerMm);
 
-      const portProps: string[] = [];
+      const extraPortProps: string[] = [];
+      let embedded: { exhId: string; edgeId: string; exType: 'EX3' | 'EX1'; closed: boolean } | undefined;
       if (g.portName) {
-        const embedded = embeddedExhByHostPort.get(`${comp.id}::${g.portName}`);
+        embedded = embeddedExhByHostPort.get(`${comp.id}::${g.portName}`);
         if (embedded) {
-          portProps.push(` S ex_type S ${embedded.exType}`);
-          portProps.push(
-            embedded.exType === 'EX4'
+          extraPortProps.push(
+            embedded.closed
               ? ` S _MCP_PLUG_ID S ${embedded.exhId}`
               : ` S _MCP_EXH_ID S ${embedded.exhId}`,
           );
-          portProps.push(
-            embedded.exType === 'EX4'
+          extraPortProps.push(
+            embedded.closed
               ? ` S _MCP_PLUG_EDGE_ID S ${embedded.edgeId}`
               : ` S _MCP_EXH_EDGE_ID S ${embedded.edgeId}`,
           );
         }
       }
+
+      let isHiddenPilot = false;
+      if (isValve && g.role === 'pilot' && g.portName) {
+        const isLeftPilot = g.gateIndex === gates.length - 1;
+        const sideAct = isLeftPilot ? comp.leftActuation : comp.rightActuation;
+        const isWired = wiredPorts.has(g.portName) || Boolean(embedded);
+        if (!isWired && sideAct?.type !== 'pneumatic_pilot') {
+          isHiddenPilot = true;
+        }
+      }
+
+      const portProps =
+        g.connClass === 'PConnection'
+          ? buildPConnectionProps({
+              exType: embedded ? embedded.exType : 'EX0',
+              closed: embedded ? embedded.closed : false,
+              hidden: isHiddenPilot,
+              extraProps: extraPortProps,
+            })
+          : extraPortProps;
 
       const pid = pushObj({
         cls: g.connClass,
@@ -915,7 +1093,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         cls: g.connClass,
         cx: px,
         cy: py,
-        hidden: false,
+        hidden: isHiddenPilot,
         exitNormal: tNorm,
       });
       if (g.portName) {
@@ -1123,33 +1301,46 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       const gy = Math.round((y1 + y2) / 2);
       const emitSideUe = (act: ValveActuationSide | undefined, isLeft: boolean): void => {
         const gx = isLeft ? x1 + 2048 : x2 - 2048;
-        const ueProps = act?.type === 'solenoid' && act.label ? [` S label S ${act.label}`] : [];
+        const isActive = act?.type === 'solenoid' && Boolean(act.label);
+        const ueProps: string[] = [
+          ' F label_pos x_offset I 0',
+          ' F label_pos y_offset I 0',
+          ...(isActive ? [` S label S ${act!.label}`] : [' S state INT 4']),
+        ];
         const ueId = pushObj({
           cls: 'UEConnection',
-          x1: gx - 1024,
-          y1: gy - 1024,
-          x2: gx + 1024,
-          y2: gy + 1024,
+          x1: gx - 5120,
+          y1: gy - 5120,
+          x2: gx + 5120,
+          y2: gy + 5120,
           rot: 0,
           flip: 0,
-          flags: 0,
+          flags: 4945923,
           props: ueProps,
         });
         emittedGates.push({ gateNum: nextGate++, parentId: compObjId, childId: ueId });
       };
       const emitSideUm = (act: ValveActuationSide | undefined, isLeft: boolean): void => {
-        if (!act || (act.type !== 'roller' && act.type !== 'idle_return_roller') || !act.label) return;
         const gx = isLeft ? x1 + 2048 : x2 - 2048;
+        const isActive =
+          Boolean(act) &&
+          (act!.type === 'roller' || act!.type === 'idle_return_roller') &&
+          Boolean(act!.label);
+        const umProps: string[] = [
+          ' F label_pos x_offset I 0',
+          ' F label_pos y_offset I 0',
+          ...(isActive ? [` S label S ${act!.label}`] : [' S state INT 4']),
+        ];
         const umId = pushObj({
           cls: 'UMConnection',
-          x1: gx - 1024,
-          y1: gy - 1024,
-          x2: gx + 1024,
-          y2: gy + 1024,
+          x1: gx - 5120,
+          y1: gy - 5120,
+          x2: gx + 5120,
+          y2: gy + 5120,
           rot: 0,
           flip: 0,
-          flags: 0,
-          props: [` S label S ${act.label}`],
+          flags: 4593923,
+          props: umProps,
         });
         emittedGates.push({ gateNum: nextGate++, parentId: compObjId, childId: umId });
       };
@@ -1169,10 +1360,16 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       const drH = 8 * 1024;
       const drY2 = Math.max(titleY2 + 22 * 1024, y1 - 3 * 1024);
       const drY1 = Math.max(titleY2 + 21 * 1024, drY2 - drH);
-      const drProps: string[] = [` S _MCP_OWNER_ID S ${comp.id}`];
+      const drProps: string[] = [
+        ' F label_pos x_offset I 0',
+        ' F label_pos y_offset I 0',
+        ` S _MCP_OWNER_ID S ${comp.id}`,
+      ];
       comp.distanceRule.forEach((m, idx) => {
         drProps.push(` S label${idx} S ${m.label}`);
         drProps.push(` S pos${idx} F ${m.positionMm}`);
+        drProps.push(` S pos_l_${idx} F ${m.positionMm}`);
+        drProps.push(` S pos_r_${idx} F ${m.positionMm}`);
       });
       pushObj({
         cls: 'R_SCHALT',
@@ -1182,7 +1379,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         y2: drY2,
         rot: 0,
         flip: 0,
-        flags: 0,
+        flags: 4253703,
         props: drProps,
       });
       reservedLabelBoxesMm.push({
@@ -1262,6 +1459,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
     const portA = routingPorts.get(meta.fromPid);
     const portObjA = emittedObjects[meta.fromPid];
     if (pts && pts.length >= 2 && portA && portObjA) {
+      const lLines: string[] = [];
       for (let i = 0; i < pts.length - 1; i++) {
         const a = pts[i];
         const b = pts[i + 1];
@@ -1270,7 +1468,7 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
         const dy1 = a.y - portA.cy + 5120;
         const dx2 = b.x - portA.cx - 5120;
         const dy2 = b.y - portA.cy - 5120;
-        portObjA.props.push(`L ${dx1} ${dy1} ${dx2} ${dy2}`);
+        lLines.push(`L ${dx1} ${dy1} ${dx2} ${dy2}`);
         wireSegmentsMm.push({
           x1: (a.x - originOffsetX) / unitPerMm,
           y1: (a.y - originOffsetY) / unitPerMm + 32,
@@ -1279,8 +1477,16 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
           netId: key,
         });
       }
+      // CRITICAL FluidSIM 4.5 parser invariant: ALL `L ...` polyline lines MUST appear
+      // immediately after the PConnection/EConnection header, strictly BEFORE any `S`/`F` props!
+      if (lLines.length > 0) {
+        const existingLCount = portObjA.props.findIndex((p) => !p.startsWith('L '));
+        const insertAt = existingLCount === -1 ? portObjA.props.length : existingLCount;
+        portObjA.props.splice(insertAt, 0, ...lLines);
+      }
     }
-    const connProps: string[] = [];
+    const connProps: string[] = [' S COLOR I 0'];
+    if (meta.kind === 'PLine') connProps.push(' S Style I 2');
     if (meta.edgeId) connProps.push(` S _MCP_EDGE_ID S ${meta.edgeId}`);
     if (meta.isManifoldLink) connProps.push(' S _MCP_MANIFOLD_LINK B T');
     connectionLines.push(`CON ${meta.kind} ${meta.fromPid} ${meta.toPid}`);
@@ -1323,9 +1529,14 @@ export function serializeDocumentToCtContainer(document: CircuitDocument): {
       y2: ly2,
       rot: 0,
       flip: 0,
-      flags: 0,
+      flags: 1167363,
       props: [
+        ' S text_FEST B T',
         ` S text S ${lbl.text}`,
+        ' S height I 10',
+        ' S color I 0',
+        ' S font_name_FEST B T',
+        ' S font_name S Arial',
         ` S _MCP_LABEL_FOR S ${lbl.ownerId}`,
         ...(lbl.kind === 'section' ? [' S _MCP_LABEL_KIND S section'] : []),
       ],
@@ -1390,6 +1601,7 @@ export interface CtVisualLayoutInvariantReport {
   negativeCoordObjects: Array<{ cls: string; objId: number; x1: number; y1: number }>;
   titleCollisions: Array<{ cls: string; objId: number; y1: number; titleY2: number }>;
   overlaps: Array<{ a: string; b: string }>;
+  formatErrors: string[];
   wireGeometry: CtWireGeometryReport;
   f9Solver: ValveSolverInvariantReport;
 }
@@ -1413,6 +1625,24 @@ const DXF_SYMBOL_REQUIRED_CLASSES = new Set([
   'NozzleP',
 ]);
 
+const FORBIDDEN_ENUM_CLASSES = new Set([
+  'PPE1',
+  'PPE2',
+  'Wartungseinheit2',
+  'PTriconnection',
+  'ETriconnection',
+  'PAV1',
+  'PAV1S',
+  'PAR1b',
+  'PSW1',
+  'PEW',
+  'pol1',
+  'pol2',
+  'lampe',
+  'text',
+  'R_SCHALT',
+]);
+
 export function verifyCtVisualLayoutInvariants(
   ctBody: string,
   trailerText: string,
@@ -1421,7 +1651,21 @@ export function verifyCtVisualLayoutInvariants(
   const ast = parseCtBodyAst(ctBody);
 
   const symIds = new Set<number>();
+  const formatErrors: string[] = [];
   let inSymSection = false;
+  let currentSymId: number | null = null;
+  let currentSymHasNonZero = false;
+  let currentSymPrimCount = 0;
+
+  const flushSymCheck = (): void => {
+    if (currentSymId !== null && currentSymPrimCount > 0 && !currentSymHasNonZero) {
+      formatErrors.push(`BEGINSYM block SYM ${currentSymId} is degenerate (all coordinates are zero).`);
+    }
+    currentSymId = null;
+    currentSymHasNonZero = false;
+    currentSymPrimCount = 0;
+  };
+
   for (const rawLine of trailerText.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (line === 'BEGINSYM') {
@@ -1429,14 +1673,34 @@ export function verifyCtVisualLayoutInvariants(
       continue;
     }
     if (line === 'ENDSYM') {
+      flushSymCheck();
       inSymSection = false;
       continue;
     }
-    if (inSymSection) {
+    if (inSymSection && line.length > 0) {
       const m = line.match(/^SYM\s+(\d+)$/);
-      if (m) symIds.add(Number(m[1]));
+      if (m) {
+        flushSymCheck();
+        currentSymId = Number(m[1]);
+        symIds.add(currentSymId);
+        continue;
+      }
+      // FluidSIM 4.5 BEGINSYM lines strictly use numeric opcodes 1, 2, 3, 4, 5
+      if (!/^[1-5]\s+-?\d+/.test(line)) {
+        formatErrors.push(`Invalid non-numeric BEGINSYM primitive opcode: "${line.slice(0, 60)}"`);
+      } else {
+        currentSymPrimCount++;
+        const nums = line
+          .split(/\s+/)
+          .slice(1)
+          .map((n) => Number(n));
+        if (nums.some((n) => Number.isFinite(n) && n !== 0)) {
+          currentSymHasNonZero = true;
+        }
+      }
     }
   }
+  flushSymCheck();
 
   const missingSymbols: CtVisualLayoutInvariantReport['missingSymbols'] = [];
   const missingDxfPrimList: CtVisualLayoutInvariantReport['missingDxfPrimList'] = [];
@@ -1447,7 +1711,52 @@ export function verifyCtVisualLayoutInvariants(
   const nonPortObjs: RawCtObject[] = [];
   let titleObj: RawCtObject | undefined;
 
+  // Inspect raw object blocks for FluidSIM 4.5 parser-level format invariants
   for (const obj of ast.objects) {
+    let seenNonLProp = false;
+    const seenScalar = new Set<string>();
+    const seenField = new Set<string>();
+    for (const p of obj.props) {
+      if (p.startsWith('L ')) {
+        if (seenNonLProp) {
+          formatErrors.push(
+            `${obj.cls}#O${obj.objId} emits polyline "L ..." AFTER scalar/field property (triggers FluidSIM Unknown file format).`,
+          );
+        }
+        continue;
+      }
+      seenNonLProp = true;
+      if (
+        p.trim() === 'F enum UNKNOWN B T' &&
+        (FORBIDDEN_ENUM_CLASSES.has(obj.cls) || obj.cls.startsWith('E_'))
+      ) {
+        formatErrors.push(`${obj.cls}#O${obj.objId} emits invalid "F enum UNKNOWN B T" property.`);
+      }
+      const mScalar = p.match(/^\s+S\s+(\S+)\s+/);
+      if (mScalar) {
+        if (seenScalar.has(mScalar[1])) {
+          formatErrors.push(`${obj.cls}#O${obj.objId} has duplicate scalar property "S ${mScalar[1]}".`);
+        }
+        seenScalar.add(mScalar[1]);
+      } else {
+        const mField = p.match(/^\s+F\s+(\S+)\s+(\S+)\s+/);
+        if (mField) {
+          const fk = `${mField[1]}::${mField[2]}`;
+          if (seenField.has(fk)) {
+            formatErrors.push(`${obj.cls}#O${obj.objId} has duplicate field property "F ${mField[1]} ${mField[2]}".`);
+          }
+          seenField.add(fk);
+        }
+      }
+    }
+
+    const isValveCls = obj.cls === 'WV_2' || obj.cls === 'WV_3' || obj.cls === 'WV_4' || obj.cls === 'WV_5';
+    if (!isValveCls && obj.flip !== 0) {
+      formatErrors.push(
+        `${obj.cls}#O${obj.objId} has non-zero header col7 (${obj.flip}); mirroring must use "S FLIPPED I <n>".`,
+      );
+    }
+
     if (PORT_CLASSES.has(obj.cls)) continue;
     nonPortObjs.push(obj);
 
@@ -1510,6 +1819,7 @@ export function verifyCtVisualLayoutInvariants(
       negativeCoordObjects.length === 0 &&
       titleCollisions.length === 0 &&
       overlaps.length === 0 &&
+      formatErrors.length === 0 &&
       wireGeometry.ok &&
       f9Solver.ok,
     symCount: symIds.size,
@@ -1518,6 +1828,7 @@ export function verifyCtVisualLayoutInvariants(
     negativeCoordObjects,
     titleCollisions,
     overlaps,
+    formatErrors,
     wireGeometry,
     f9Solver,
   };

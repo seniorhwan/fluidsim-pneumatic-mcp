@@ -63,7 +63,7 @@ import {
 } from './tools/verifyTools';
 
 export const SERVER_NAME = 'fluidsim-pneumatics-mcp';
-export const SERVER_VERSION = '0.3.0';
+export const SERVER_VERSION = '2.0.0';
 
 export interface CreateServerOptions {
   workspaceRoot: string;
@@ -77,6 +77,8 @@ export interface CreateServerOptions {
 export interface StartHttpServerOptions extends CreateServerOptions {
   host?: string;
   port?: number;
+  sessionTtlMs?: number;
+  maxSessions?: number;
 }
 
 /**
@@ -403,13 +405,57 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
     createIfMissing: options.initWorkspace === true || accessMode === 'authoring',
   });
 
+  const sessionTtlMs = Math.max(1000, options.sessionTtlMs ?? 30 * 60 * 1000);
+  const maxSessions = Math.max(1, options.maxSessions ?? 128);
+
   const app = express();
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    next();
+  });
   app.use(express.json({ limit: '4mb' }));
+  app.use(
+    (
+      err: unknown,
+      _req: express.Request,
+      res: express.Response,
+      next: express.NextFunction,
+    ) => {
+      if (
+        err &&
+        typeof err === 'object' &&
+        ('type' in err || err instanceof SyntaxError) &&
+        ((err as { type?: string }).type === 'entity.parse.failed' || err instanceof SyntaxError)
+      ) {
+        res.status(400).json({
+          jsonrpc: '2.0',
+          error: { code: -32700, message: 'Parse error: malformed JSON request body.' },
+          id: null,
+        });
+        return;
+      }
+      next(err);
+    },
+  );
 
   const sessions = new Map<
     string,
-    { server: McpServer; transport: StreamableHTTPServerTransport }
+    { server: McpServer; transport: StreamableHTTPServerTransport; lastActivityMs: number }
   >();
+
+  const sweepExpiredSessions = (): void => {
+    const now = Date.now();
+    for (const [sid, entry] of sessions.entries()) {
+      if (now - entry.lastActivityMs >= sessionTtlMs) {
+        sessions.delete(sid);
+        void entry.transport.close();
+        void entry.server.close();
+      }
+    }
+  };
+  const sweepIntervalMs = Math.min(60_000, Math.max(1000, Math.floor(sessionTtlMs / 2)));
+  const sweepTimer = setInterval(sweepExpiredSessions, sweepIntervalMs);
+  sweepTimer.unref();
 
   app.get('/health', (_req, res) => {
     res.json({
@@ -420,6 +466,7 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
       accessMode,
       workspaceRoot: guard.root,
       activeSessions: sessions.size,
+      maxSessions,
     });
   });
 
@@ -430,16 +477,29 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
 
       if (sessionId && sessions.has(sessionId)) {
         const entry = sessions.get(sessionId)!;
+        entry.lastActivityMs = Date.now();
         await entry.transport.handleRequest(req, res, req.body);
         return;
       }
 
       if (!sessionId && isInitializeRequest(req.body)) {
+        sweepExpiredSessions();
+        if (sessions.size >= maxSessions) {
+          res.status(503).json({
+            jsonrpc: '2.0',
+            error: {
+              code: -32000,
+              message: `Server session limit reached (${maxSessions} active MCP sessions).`,
+            },
+            id: null,
+          });
+          return;
+        }
         const { server } = createFluidsimMcpServer(options);
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => crypto.randomUUID(),
           onsessioninitialized: (sid) => {
-            sessions.set(sid, { server, transport });
+            sessions.set(sid, { server, transport, lastActivityMs: Date.now() });
           },
         });
         transport.onclose = () => {
@@ -499,6 +559,7 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
       return;
     }
     const entry = sessions.get(sessionId)!;
+    entry.lastActivityMs = Date.now();
     await entry.transport.handleRequest(req, res);
   });
 
@@ -537,6 +598,7 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
   );
 
   const close = async (): Promise<void> => {
+    clearInterval(sweepTimer);
     for (const entry of sessions.values()) {
       await entry.transport.close();
       await entry.server.close();

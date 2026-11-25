@@ -418,13 +418,25 @@ test('Streamable HTTP transport serves /health and full MCP sessions on /mcp', a
 
   const client = new Client({ name: 'test-http-host', version: '1.0.0' });
   try {
-    // 1. Health endpoint
+    // 1. Health endpoint & security headers
     const healthUrl = srv.url.replace(/\/mcp$/, '/health');
     const healthResp = await fetch(healthUrl);
     assert.equal(healthResp.status, 200);
-    const health = (await healthResp.json()) as { status: string; transport: string };
+    assert.equal(healthResp.headers.get('x-content-type-options'), 'nosniff');
+    const health = (await healthResp.json()) as { status: string; transport: string; version: string };
     assert.equal(health.status, 'ok');
     assert.equal(health.transport, 'streamable-http');
+    assert.equal(health.version, '2.0.0');
+
+    // 1b. Malformed JSON returns 400 with JSON-RPC -32700 parse error
+    const badJsonResp = await fetch(srv.url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"jsonrpc": "2.0", "id": 1, broken',
+    });
+    assert.equal(badJsonResp.status, 400);
+    const badJsonBody = (await badJsonResp.json()) as { error?: { code?: number } };
+    assert.equal(badJsonBody.error?.code, -32700);
 
     // 2. Full MCP client over StreamableHTTPClientTransport
     const transport = new StreamableHTTPClientTransport(new URL(srv.url));
@@ -441,6 +453,46 @@ test('Streamable HTTP transport serves /health and full MCP sessions on /mcp', a
     assert.equal(docRes.data?.status, 'ok');
   } finally {
     await client.close();
+    await srv.close();
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('Streamable HTTP transport enforces maxSessions cap with HTTP 503', async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'fsim-mcp-http-cap-'));
+  const srv = await startHttpServer({
+    workspaceRoot: workspace,
+    accessMode: 'read-only',
+    host: '127.0.0.1',
+    port: 0,
+    repoRoot: REPO_ROOT,
+    maxSessions: 1,
+  });
+
+  const client1 = new Client({ name: 'test-http-cap-1', version: '1.0.0' });
+  try {
+    await client1.connect(new StreamableHTTPClientTransport(new URL(srv.url)));
+
+    const secondInitResp = await fetch(srv.url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-03-26',
+          capabilities: {},
+          clientInfo: { name: 'test-http-cap-2', version: '1.0.0' },
+        },
+      }),
+    });
+    assert.equal(secondInitResp.status, 503);
+  } finally {
+    await client1.close();
     await srv.close();
     fs.rmSync(workspace, { recursive: true, force: true });
   }

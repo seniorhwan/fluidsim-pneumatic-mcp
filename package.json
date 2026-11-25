@@ -1,7 +1,7 @@
 {
   "name": "fluidsim-pneumatics-mcp",
   "private": true,
-  "version": "0.2.0",
+  "version": "2.0.0",
   "type": "module",
   "bin": {
     "fluidsim-mcp": "./dist/bin/fluidsim-mcp.js"

@@ -22,6 +22,7 @@ import { serializeCircuitDocument } from '../codec/ctSerializer';
 import { parseCircuitBuffer } from '../codec/ctParser';
 import { decodeCtContainer } from '../codec/ctBinaryCodec';
 import { verifyCtVisualLayoutInvariants } from '../codec/ctTextCompiler';
+import { validateCircuitStatic } from '../simulator/validator';
 
 test('D4 orientation algebra: all 16 (rot x FLIPPED) combinations preserve box bounds, port invariance, and reflection-safe arc reversal', () => {
   const rots: RotationDeg[] = [0, 90, 180, 270];
@@ -282,4 +283,165 @@ test('topologyNormalizer decomposes 4-endpoint named nets into strictly 3-gate T
 
   const reparsed = parseCircuitBuffer(ctBytes, 'v2_nets_test.ct');
   assert.equal(reparsed.document.components.filter((c) => c.type === 'nozzle').length, 3);
+});
+
+test('FluidSIM 4.5 format & solver regression: numeric BEGINSYM, L-before-S, zero F enum UNKNOWN, WV_2/WV_5/CONF_L/R, gates, col7 flipOffset, pol2/pol1/lampe, blind_plug, open nozzle, pneumatic-only inference', () => {
+  // 1. Direct WV_2 (C2O/C2B) and WV_5 5/3 closed center (C5B) + CONF_L/CONF_R checks
+  const wv2Comp: ComponentNode = {
+    id: 'V2',
+    type: 'valve_2_2',
+    label: '1V0',
+    params: { normalState: 'NC' },
+    leftActuation: { type: 'solenoid', label: 'Y0', internalPilot: true },
+    rightActuation: { type: 'pneumatic_spring' },
+  };
+  const compiledWv2 = compileFluidSim45Valve(wv2Comp);
+  assert.ok(compiledWv2, 'Expected WV_2 valve compilation');
+  assert.equal(compiledWv2.cls, 'WV_2');
+  assert.equal(compiledWv2.flipOffset, -18432);
+  assert.ok(compiledWv2.props.some((p) => p.includes('C2B')), `Expected C2B in WV_2 props: ${compiledWv2.props.join(', ')}`);
+  assert.ok(compiledWv2.props.some((p) => p.includes('C2O')), `Expected C2O in WV_2 props: ${compiledWv2.props.join(', ')}`);
+  assert.ok(compiledWv2.props.includes(' S CONF_L I 1'), 'Expected CONF_L=1 for internalPilot');
+  assert.ok(compiledWv2.props.includes(' S CONF_R I 3'), 'Expected CONF_R=3 for pneuSpring');
+  assert.ok(!compiledWv2.props.some((p) => p.includes('F enum UNKNOWN')), 'WV_2 must never emit F enum UNKNOWN');
+
+  const wv5Closed: ComponentNode = {
+    id: 'V53',
+    type: 'valve_5_3',
+    label: '2V1',
+    params: { centerType: 'closed' },
+    leftActuation: { type: 'solenoid', label: 'Y1', internalPilot: true },
+    rightActuation: { type: 'solenoid', label: 'Y2', internalPilot: false },
+  };
+  const compiledWv5 = compileFluidSim45Valve(wv5Closed);
+  assert.ok(compiledWv5, 'Expected WV_5 5/3 closed center compilation');
+  assert.equal(compiledWv5.cls, 'WV_5');
+  assert.equal(compiledWv5.flipOffset, -30720);
+  assert.ok(compiledWv5.props.some((p) => p.includes('C5B')), `Expected C5B closed center in WV_5 props: ${compiledWv5.props.join(', ')}`);
+  assert.ok(compiledWv5.props.includes(' S CONF_L I 1'), 'Expected CONF_L=1 for internalPilot');
+  assert.ok(compiledWv5.props.includes(' S CONF_R I 0'), 'Expected CONF_R=0 when internalPilot is false');
+
+  // 2. Full electro-pneumatic + blind_plug + mirrored non-valve + open nozzle circuit
+  const doc: CircuitDocument = {
+    schemaVersion: '2.0',
+    metadata: {
+      title: 'FluidSIM 4.5 Format Compliance Audit',
+      fluidsimVersion: '4.5',
+      format: 'fsim-ir-json',
+      sheetSize: 'DIN_A4_LANDSCAPE',
+      sheetWidthMm: 297,
+      sheetHeightMm: 210,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    components: [
+      { id: 'SRC', type: 'air_source', label: '0Z1', params: { pressureBar: 6 } },
+      {
+        id: 'V1',
+        type: 'valve_5_2',
+        label: '1V1',
+        mirror: 'horizontal',
+        params: {},
+        leftActuation: { type: 'solenoid', label: 'Y1', internalPilot: true },
+        rightActuation: { type: 'spring' },
+        portTerminators: { '3': 'exhaust_silencer', '5': 'blind_plug' },
+      },
+      { id: 'C1', type: 'cylinder_double_acting', label: '1A1', params: { strokeMm: 100 } },
+      { id: 'NZ1', type: 'nozzle', label: '1V2', mirror: 'vertical', params: { openingPct: 50 } },
+      { id: 'P24', type: 'power_24v', label: '+24V', params: {} },
+      { id: 'P0', type: 'power_0v', label: '0V', params: {} },
+      { id: 'SW1', type: 'pushbutton_no', label: 'S1', params: {} },
+      { id: 'SOL1', type: 'valve_solenoid', label: 'Y1', params: {} },
+      { id: 'H1', type: 'indicator_lamp', label: 'H1', params: { color: 'green' } },
+    ],
+    connections: [],
+    nets: [
+      { id: 'N_SUP', domain: 'pneumatic', endpoints: [{ componentId: 'SRC', port: '1' }, { componentId: 'V1', port: '1' }] },
+      { id: 'N_A', domain: 'pneumatic', endpoints: [{ componentId: 'V1', port: '4' }, { componentId: 'C1', port: 'A' }, { componentId: 'NZ1', port: '1' }] },
+      { id: 'N_B', domain: 'pneumatic', endpoints: [{ componentId: 'V1', port: '2' }, { componentId: 'C1', port: 'B' }] },
+      { id: 'E_24', domain: 'electrical', endpoints: [{ componentId: 'P24', port: 'OUT' }, { componentId: 'SW1', port: '13' }] },
+      { id: 'E_LOAD', domain: 'electrical', endpoints: [{ componentId: 'SW1', port: '14' }, { componentId: 'SOL1', port: 'A1' }, { componentId: 'H1', port: 'X1' }] },
+      { id: 'E_0', domain: 'electrical', endpoints: [{ componentId: 'SOL1', port: 'A2' }, { componentId: 'H1', port: 'X2' }, { componentId: 'P0', port: 'IN' }] },
+    ],
+  };
+
+  // Nozzle port 2 left open to atmosphere must pass static validation cleanly
+  const staticVal = validateCircuitStatic(doc);
+  assert.equal(staticVal.valid, true, `Expected open nozzle port 2 to pass static validation: ${JSON.stringify(staticVal)}`);
+
+  const ctBytes = serializeCircuitDocument(doc, { targetPath: 'fs45_format_audit.ct' });
+  const decoded = decodeCtContainer(ctBytes, 'fs45_format_audit.ct');
+
+  // Format invariants
+  const vis = verifyCtVisualLayoutInvariants(decoded.ctBody, decoded.trailerText);
+  assert.equal(vis.ok, true, `Visual/format/F9 invariants failed: ${JSON.stringify(vis)}`);
+  assert.equal(vis.formatErrors.length, 0, `Format errors: ${JSON.stringify(vis.formatErrors)}`);
+  assert.equal(vis.f9Solver.ok, true, `F9 solver errors: ${JSON.stringify(vis.f9Solver)}`);
+  assert.ok(!decoded.ctBody.includes('F enum UNKNOWN'), 'Compiled .ct must never emit F enum UNKNOWN B T');
+
+  // Authentic FluidSIM 4.5 electrical classes
+  assert.ok(decoded.ctBody.includes('pol2 '), 'Expected pol2 class for power_24v');
+  assert.ok(decoded.ctBody.includes('pol1 '), 'Expected pol1 class for power_0v');
+  assert.ok(decoded.ctBody.includes('lampe '), 'Expected lampe class for indicator_lamp');
+
+  // Authentic col7 flipOffset + S FLIPPED I <n> on both valve and non-valve mirrored components
+  assert.ok(/WV_5 O\d+ -?\d+ -?\d+ -?\d+ -?\d+ 0 -30720 /.test(decoded.ctBody), 'Expected WV_5 header col7=-30720');
+  assert.ok(decoded.ctBody.includes(' S FLIPPED I 1'), 'Expected S FLIPPED I 1 on horizontally mirrored WV_5');
+  assert.ok(/NozzleP O\d+ -?\d+ -?\d+ -?\d+ -?\d+ 0 0 /.test(decoded.ctBody), 'Expected non-valve NozzleP header col7=0 even when mirrored');
+  assert.ok(decoded.ctBody.includes(' S FLIPPED I 2'), 'Expected S FLIPPED I 2 on vertically mirrored NozzleP');
+
+  // Inline blind_plug emitted as EX1 + S closed B T and roundtrips back to blind_plug
+  assert.ok(decoded.ctBody.includes('ex_type S EX1'), 'Expected blind_plug emitted as ex_type S EX1');
+  assert.ok(decoded.ctBody.includes(' S closed B T'), 'Expected blind_plug emitted with S closed B T');
+  const reparsed = parseCircuitBuffer(ctBytes, 'fs45_format_audit.ct').document;
+  const plugCount =
+    reparsed.components.filter((c) => c.type === 'blind_plug').length +
+    reparsed.components.filter((c) => Object.values(c.portTerminators ?? {}).includes('blind_plug')).length;
+  assert.ok(plugCount >= 1, `Expected blind_plug to survive roundtrip: ${JSON.stringify(reparsed.components.map((c) => ({ id: c.id, type: c.type, pt: c.portTerminators })))}`);
+
+  // BEGINSYM block must contain only numeric opcodes (1/3/4/5) and zero degenerate all-zero 1 0 0 0 0 lines
+  if (decoded.trailerText.includes('BEGINSYM')) {
+    const symBody = decoded.trailerText.slice(decoded.trailerText.indexOf('BEGINSYM'));
+    assert.ok(!/^1 0 0 0 0$/m.test(symBody), 'BEGINSYM must not contain degenerate zero-scaled 1 0 0 0 0 lines');
+    assert.ok(!/^(?:LINE|RECT|CIRCLE|ARC|TEXT|POLY)\b/m.test(symBody), 'BEGINSYM must use numeric FluidSIM opcodes only');
+  }
+
+  // 3. Pneumatic-only .ct with solenoid valve auto-infers sheetDomain='pneumatic-only' & allowExternalElectricalSheet=true
+  const pneuOnlyDoc: CircuitDocument = {
+    schemaVersion: '2.0',
+    metadata: {
+      title: 'Pneumatic Only Auto-Inference',
+      fluidsimVersion: '4.5',
+      format: 'fsim-ir-json',
+      sheetSize: 'DIN_A4_LANDSCAPE',
+      sheetWidthMm: 297,
+      sheetHeightMm: 210,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    components: [
+      { id: 'SRC', type: 'air_source', label: '0Z1', params: { pressureBar: 6 } },
+      {
+        id: 'V1',
+        type: 'valve_3_2',
+        label: '1V1',
+        params: { normalState: 'NC' },
+        leftActuation: { type: 'solenoid', label: 'Y1', internalPilot: true },
+        rightActuation: { type: 'spring' },
+        portTerminators: { '3': 'exhaust_silencer' },
+      },
+      { id: 'C1', type: 'cylinder_single_acting', label: '1A1', params: { strokeMm: 50 } },
+    ],
+    connections: [],
+    nets: [
+      { id: 'N1', domain: 'pneumatic', endpoints: [{ componentId: 'SRC', port: '1' }, { componentId: 'V1', port: '1' }] },
+      { id: 'N2', domain: 'pneumatic', endpoints: [{ componentId: 'V1', port: '2' }, { componentId: 'C1', port: 'A' }] },
+    ],
+  };
+  const pneuBytes = serializeCircuitDocument(pneuOnlyDoc, { targetPath: 'pneu_only_infer.ct' });
+  const reparsedPneu = parseCircuitBuffer(pneuBytes, 'pneu_only_infer.ct').document;
+  assert.equal(reparsedPneu.metadata.sheetDomain, 'pneumatic-only');
+  assert.equal(reparsedPneu.metadata.allowExternalElectricalSheet, true);
+  const pneuVal = validateCircuitStatic(reparsedPneu);
+  assert.equal(pneuVal.valid, true, `Reparsed pneumatic-only .ct should pass static validation: ${JSON.stringify(pneuVal)}`);
 });

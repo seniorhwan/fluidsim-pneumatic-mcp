@@ -142,8 +142,8 @@ function getValveBodyCodes(comp: ComponentNode): {
 
   switch (comp.type) {
     case 'valve_2_2': {
-      const leftCode = isNormallyOpen ? 'C2C' : 'C2P';
-      const rightCode = isNormallyOpen ? 'C2P' : 'C2C';
+      const leftCode = isNormallyOpen ? 'C2B' : 'C2O';
+      const rightCode = isNormallyOpen ? 'C2O' : 'C2B';
       return {
         cls: 'WV_2',
         description: '2/n Way Valve',
@@ -156,9 +156,9 @@ function getValveBodyCodes(comp: ComponentNode): {
         rightBodyCv: rightCode.slice(1),
         offsets: [
           ' S OFFSET_(2tC4C) I 0',
-          ' S OFFSET_(2tC2C) I -18',
+          ' S OFFSET_(2tC2B) I -18',
           ' S OFFSET_(1tC4P) I 24',
-          ' S OFFSET_(1tC2P) I 6',
+          ' S OFFSET_(1tC2O) I 6',
         ],
         conDescrCount: 8,
       };
@@ -211,7 +211,7 @@ function getValveBodyCodes(comp: ComponentNode): {
           ? 'C5E'
           : centerType === 'pressurized'
             ? 'C5P'
-            : 'C5C';
+            : 'C5B';
       return {
         cls: 'WV_5',
         description: '5/n Way Valve',
@@ -484,11 +484,13 @@ export function compileFluidSim45Valve(comp: ComponentNode): CompiledValveSpec {
     ? `${right.cvSpringBit}${right.cvMaTok}${right.cvMeTok}${right.cvElPnTok}${left.cvSpringBit}${left.cvMaTok}${left.cvMeTok}${left.cvElPnTok}${posResetIdx}${body.rightBodyCv}${body.midBodyCv}${body.leftBodyCv}`
     : `${right.cvSpringBit}${right.cvMaTok}${right.cvMeTok}${right.cvElPnTok}${left.cvSpringBit}${left.cvMaTok}${left.cvMeTok}${left.cvElPnTok}${posResetIdx}${body.rightBodyCv}${body.leftBodyCv}`;
 
+  const confL = left.internalPilot ? 1 : left.pneuSpring ? 3 : 0;
+  const confR = right.internalPilot ? 1 : right.pneuSpring ? 3 : 0;
+
   const props: string[] = [
     ...body.offsets,
     ' S description_FEST B T',
     ` S description S ${body.description}`,
-    ' F enum UNKNOWN B T',
     ' S PNEU_SPRING_R_FEST B T',
     ` S PNEU_SPRING_R S ${right.pneuSpring ? 'TRUE' : 'FALSE'}`,
     ' S SPRING_L_FEST B T',
@@ -512,7 +514,7 @@ export function compileFluidSim45Valve(comp: ComponentNode): CompiledValveSpec {
     ...(right.internalPilot ? [' S PILOT_R_FEST B T', ' S PILOT_R B T'] : []),
     ' S ACTUATION_R_ME_FEST B T',
     ` S ACTUATION_R_ME S ${right.meCode}`,
-    ' S CONF_L I 0',
+    ` S CONF_L I ${confL}`,
     ' S ACTUATION_R_MA_FEST B T',
     ` S ACTUATION_R_MA S ${right.maCode}`,
     ' S ACTUATION_L_EL_PN_FEST B T',
@@ -522,7 +524,7 @@ export function compileFluidSim45Valve(comp: ComponentNode): CompiledValveSpec {
     ` S ACTUATION_L_ME S ${left.meCode}`,
     ' S ACTUATION_L_MA_FEST B T',
     ` S ACTUATION_L_MA S ${left.maCode}`,
-    ' S CONF_R I 0',
+    ` S CONF_R I ${confR}`,
     ' S CV_ID_FEST B T',
     ` S CV_ID S ${cvId}`,
     ' S SWITCHED_POS_FEST B T',
@@ -588,16 +590,16 @@ const REQUIRED_VALVE_SOLVER_PROPS = [
  */
 export function verifyCtValveSolverInvariants(ctBody: string): ValveSolverInvariantReport {
   const lines = ctBody.split('\n');
-  const objs = new Map<number, { cls: string; props: string[] }>();
+  const objs = new Map<number, { cls: string; col7: number; props: string[] }>();
   const gatesByParent = new Map<number, number[]>();
   const connectedPorts = new Set<number>();
 
   let curId = -1;
   for (const ln of lines) {
-    const mObj = ln.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+O(\d+)\s+/);
+    const mObj = ln.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+O(\d+)\s+-?\d+\s+-?\d+\s+-?\d+\s+-?\d+\s+-?\d+\s+(-?\d+)\s+-?\d+/);
     if (mObj) {
       curId = Number(mObj[2]);
-      objs.set(curId, { cls: mObj[1], props: [] });
+      objs.set(curId, { cls: mObj[1], col7: Number(mObj[3]), props: [] });
       continue;
     }
     if (curId >= 0 && ln.startsWith(' ')) {
@@ -620,6 +622,13 @@ export function verifyCtValveSolverInvariants(ctBody: string): ValveSolverInvari
       connectedPorts.add(Number(mCon[2]));
     }
   }
+
+  const EXPECTED_VALVE_GATES: Record<string, number> = {
+    WV_2: 8,
+    WV_3: 9,
+    WV_4: 10,
+    WV_5: 11,
+  };
 
   const valveErrors: ValveSolverInvariantReport['valveErrors'] = [];
   const junctionErrors: ValveSolverInvariantReport['junctionErrors'] = [];
@@ -644,6 +653,23 @@ export function verifyCtValveSolverInvariants(ctBody: string): ValveSolverInvari
           cls: obj.cls,
           objId,
           reason: 'Invalid actuation token AL_PE1_PE2 / AR_PE1_PE2 (must be AL_PE1/AR_PE1 + PILOT_L/R B T).',
+        });
+      }
+      const expectedFlipOffset = obj.cls === 'WV_5' ? -30720 : -18432;
+      if (obj.col7 !== expectedFlipOffset && obj.col7 !== 0) {
+        valveErrors.push({
+          cls: obj.cls,
+          objId,
+          reason: `Invalid header col7 flipOffset ${obj.col7} on ${obj.cls} (expected ${expectedFlipOffset}; mirror must use S FLIPPED I <n>).`,
+        });
+      }
+      const gates = gatesByParent.get(objId) ?? [];
+      const expectedGates = EXPECTED_VALVE_GATES[obj.cls];
+      if (gates.length > 0 && gates.length !== expectedGates) {
+        valveErrors.push({
+          cls: obj.cls,
+          objId,
+          reason: `Valve ${obj.cls} emitted ${gates.length} gates (expected ${expectedGates}: pneumatic + 2 UEConnection + 2 UMConnection).`,
         });
       }
     }

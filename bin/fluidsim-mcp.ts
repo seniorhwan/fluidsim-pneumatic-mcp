@@ -147,11 +147,22 @@ async function main(): Promise<void> {
         return;
       }
       const host = getFlagValue(argv, '--host') ?? '127.0.0.1';
-      await startHttpServer({
+      const srv = await startHttpServer({
         ...commonOpts,
         host,
         port,
       });
+      let shuttingDown = false;
+      const onSignal = (sig: NodeJS.Signals): void => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        process.stderr.write(`[${SERVER_NAME}] Received ${sig}, shutting down HTTP server...\n`);
+        void srv.close().finally(() => {
+          process.exit(0);
+        });
+      };
+      process.once('SIGINT', () => onSignal('SIGINT'));
+      process.once('SIGTERM', () => onSignal('SIGTERM'));
       return;
     }
 

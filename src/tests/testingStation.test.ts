@@ -241,7 +241,11 @@ test('Festo MPS Testing Station builds in 1-call circuit_build, passes F9/SVG/vi
     assert.ok(decoded.ctBody.includes('S SLEDGE B T'), 'Expected CylDGPPAB rodless cylinder SLEDGE B T');
     assert.ok(!decoded.ctBody.includes('AL_PE1_PE2'), 'Must never emit invalid AL_PE1_PE2');
     assert.ok(!decoded.ctBody.includes('AR_PE1_PE2'), 'Must never emit invalid AR_PE1_PE2');
-    assert.ok(/WV_5 O\d+ -?\d+ -?\d+ -?\d+ -?\d+ 180 3 /.test(decoded.ctBody), 'Expected rot=180 flip=3 on mirrored valve -3V2');
+    assert.ok(
+      /WV_5 O\d+ -?\d+ -?\d+ -?\d+ -?\d+ 180 -30720 /.test(decoded.ctBody),
+      'Expected rot=180 and authentic FluidSIM 4.5 WV_5 flipOffset=-30720 on mirrored valve -3V2',
+    );
+    assert.ok(decoded.ctBody.includes(' S FLIPPED I 3'), 'Expected S FLIPPED I 3 on mirrored valve -3V2');
 
     const ctVis = verifyCtVisualLayoutInvariants(decoded.ctBody, decoded.trailerText);
     assert.equal(ctVis.ok, true, `Visual/F9 invariants failed: ${JSON.stringify(ctVis)}`);

@@ -706,8 +706,8 @@ const CATALOG_METADATA: readonly CatalogMetaEntry[] = [
     displayName: 'Indicator Lamp',
     category: 'electrical_actuator',
     domain: 'electrical',
-    description: '24V DC status indicator lamp (FluidSIM 4.5 E_H001).',
-    keywords: ['lamp', 'light', 'indicator', 'pilot light', 'e_h001'],
+    description: '24V DC status indicator lamp (FluidSIM 4.5 lampe).',
+    keywords: ['lamp', 'light', 'indicator', 'pilot light', 'lampe'],
     parameters: [
       { key: 'color', type: 'enum', defaultValue: 'green', enumValues: ['green', 'red', 'yellow', 'blue', 'white'], description: 'Lamp lens color' },
     ],
